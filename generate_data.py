@@ -2,7 +2,7 @@
 generate_data.py — deterministic synthetic card-transaction data for card_analytics.
 
 Outputs (into ./output/ next to this script):
-  * one CSV per table (7 files)
+  * one CSV per table (8 files)
   * 01_schema.sql  — CREATE DATABASE + CREATE TABLE with PKs/FKs
   * 02_data.sql    — INSERTs, masters first, then card_txns
 
@@ -21,6 +21,7 @@ from collections import Counter
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
 N_CUSTOMERS = 100
+N_CARDS = 400
 N_TXNS = 3000
 YEAR = 2025
 
@@ -263,6 +264,20 @@ def build_masters():
         )
         customer_master[cid] = {"id": cid, "name": name, "phone_number": phone, "address": address}
 
+    # Cards: one per customer first (round-robin), so nobody has zero cards, then the
+    # remainder to random customers. card_id is a masked identifier, never a real PAN.
+    customer_ids = list(customer_master)
+    bins = list(bin_master)
+    card_master = {}
+    for i in range(1, N_CARDS + 1):
+        card_id = f"CARD{i:04d}"
+        customer_id = customer_ids[i - 1] if i <= len(customer_ids) else random.choice(customer_ids)
+        card_master[card_id] = {
+            "card_id": card_id,
+            "customer_id": customer_id,
+            "BIN": random.choice(bins),
+        }
+
     return {
         "issuer_master": issuer_master,
         "acquirer_master": acquirer_master,
@@ -270,6 +285,7 @@ def build_masters():
         "response_master": response_master,
         "merchant_master": merchant_master,
         "customer_master": customer_master,
+        "card_master": card_master,
     }
 
 
@@ -280,9 +296,9 @@ def build_card_txns(m):
     bin_master = m["BIN_master"]
     merchant_master = m["merchant_master"]
     response_master = m["response_master"]
-    bins = list(bin_master)
+    card_master = m["card_master"]
+    cards = list(card_master)
     merchants = list(merchant_master)
-    customers = list(m["customer_master"])
 
     # Dates: exact per-month quotas with a mild upward trend, sorted chronologically.
     month_counts = allocate(N_TXNS, [(1 + MONTHLY_GROWTH) ** k for k in range(12)])
@@ -307,7 +323,9 @@ def build_card_txns(m):
 
     txns = []
     for i in range(N_TXNS):
-        bin_ = random.choice(bins)
+        card_id = random.choice(cards)
+        customer_id = card_master[card_id]["customer_id"]        # derived from the card
+        bin_ = card_master[card_id]["BIN"]                       # derived from the card
         issuer_id = bin_master[bin_]["issuer_id"]                # derived
         merchant_id = random.choice(merchants)
         acquirer_id = merchant_master[merchant_id]["acquirer_id"]  # derived
@@ -319,7 +337,8 @@ def build_card_txns(m):
             "issuer_id": issuer_id,
             "acquirer_id": acquirer_id,
             "merchant_id": merchant_id,
-            "customer_id": random.choice(customers),
+            "customer_id": customer_id,
+            "card_id": card_id,
             "BIN": bin_,
             "country": country,
             "location": random.choice(CITIES_BY_COUNTRY[country]),
@@ -355,10 +374,16 @@ TABLES = [
      [("id", "VARCHAR(10)"), ("name", "VARCHAR(100)"), ("phone_number", "VARCHAR(16)"),
       ("address", "VARCHAR(255)")],
      "id", []),
+    ("card_master",
+     [("card_id", "VARCHAR(10)"), ("customer_id", "VARCHAR(10)"), ("BIN", "VARCHAR(6)")],
+     "card_id",
+     [("customer_id", "customer_master", "id"),
+      ("BIN", "BIN_master", "BIN")]),
     ("card_txns",
      [("txn_id", "VARCHAR(12)"), ("amt", "DECIMAL(12,2)"), ("date", "VARCHAR(10)"),
       ("issuer_id", "VARCHAR(10)"), ("acquirer_id", "VARCHAR(10)"),
       ("merchant_id", "VARCHAR(10)"), ("customer_id", "VARCHAR(10)"),
+      ("card_id", "VARCHAR(10)"),
       ("BIN", "VARCHAR(6)"), ("country", "VARCHAR(2)"), ("location", "VARCHAR(50)"),
       ("response_code", "VARCHAR(2)")],
      "txn_id",
@@ -366,6 +391,7 @@ TABLES = [
       ("acquirer_id", "acquirer_master", "id"),
       ("merchant_id", "merchant_master", "merchant_id"),
       ("customer_id", "customer_master", "id"),
+      ("card_id", "card_master", "card_id"),
       ("BIN", "BIN_master", "BIN"),
       ("response_code", "response_master", "response_code")]),
 ]
@@ -460,15 +486,42 @@ def validate(m, txns, table_rows):
             dangling += sum(1 for r in table_rows[t] if r[col] not in ref_values)
 
     # Derived values must also agree with their source master rows.
+    card_master = m["card_master"]
     inconsistent = sum(
         1 for r in txns
         if r["issuer_id"] != m["BIN_master"][r["BIN"]]["issuer_id"]
         or r["acquirer_id"] != m["merchant_master"][r["merchant_id"]]["acquirer_id"]
     )
+    card_customer_mismatch = sum(
+        1 for r in txns if r["customer_id"] != card_master[r["card_id"]]["customer_id"])
+    card_bin_mismatch = sum(
+        1 for r in txns if r["BIN"] != card_master[r["card_id"]]["BIN"])
+    dangling_cards = sum(1 for r in txns if r["card_id"] not in card_master)
+
     assert dangling == 0, f"{dangling} dangling foreign keys"
     assert inconsistent == 0, f"{inconsistent} txns with issuer/acquirer inconsistent with masters"
+    assert dangling_cards == 0, f"{dangling_cards} txns with a card_id missing from card_master"
+    assert card_customer_mismatch == 0, f"{card_customer_mismatch} txns whose customer_id != card's"
+    assert card_bin_mismatch == 0, f"{card_bin_mismatch} txns whose BIN != card's"
     print(f"\nDangling foreign keys: {dangling}  (assert passed)")
     print(f"Derived issuer/acquirer mismatches: {inconsistent}  (assert passed)")
+    print(f"Dangling card_id in card_txns: {dangling_cards}  (assert passed)")
+    print(f"txn.customer_id != card's customer_id: {card_customer_mismatch}  (assert passed)")
+    print(f"txn.BIN != card's BIN: {card_bin_mismatch}  (assert passed)")
+
+    # Cards
+    assert len(card_master) == N_CARDS, f"expected {N_CARDS} cards, got {len(card_master)}"
+    cards_per_customer = Counter(c["customer_id"] for c in card_master.values())
+    customers_without_cards = [cid for cid in m["customer_master"] if cards_per_customer[cid] == 0]
+    assert not customers_without_cards, f"{len(customers_without_cards)} customers own no card"
+    active_cards = len({r["card_id"] for r in txns})
+    print(f"\nCards: {len(card_master)}  (assert passed)")
+    print(f"Customers with zero cards: {len(customers_without_cards)}  (assert passed)")
+    print(f"Cards per customer: min {min(cards_per_customer.values())}, "
+          f"max {max(cards_per_customer.values())}, avg {len(card_master) / N_CUSTOMERS:.2f}")
+    print(f"Active cards in card_txns: {active_cards} of {len(card_master)}")
+    print(f"Average transactions per card: {len(txns) / len(card_master):.2f} "
+          f"(per active card: {len(txns) / active_cards:.2f})")
 
     months = sorted(Counter(r["date"][:7] for r in txns).items())
     assert len(months) == 12, "not all 12 months present"
@@ -505,7 +558,7 @@ def main():
     write_schema(os.path.join(OUT_DIR, "01_schema.sql"))
     write_data(os.path.join(OUT_DIR, "02_data.sql"), table_rows)
 
-    print(f"Wrote 7 CSVs, 01_schema.sql and 02_data.sql to {OUT_DIR}\n")
+    print(f"Wrote {len(TABLES)} CSVs, 01_schema.sql and 02_data.sql to {OUT_DIR}\n")
     validate(m, txns, table_rows)
 
 

@@ -4,6 +4,7 @@ USE card_analytics;
 
 SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS `card_txns`;
+DROP TABLE IF EXISTS `card_master`;
 DROP TABLE IF EXISTS `customer_master`;
 DROP TABLE IF EXISTS `merchant_master`;
 DROP TABLE IF EXISTS `response_master`;
@@ -58,6 +59,15 @@ CREATE TABLE `customer_master` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE `card_master` (
+  `card_id` VARCHAR(10) NOT NULL,
+  `customer_id` VARCHAR(10) NOT NULL,
+  `BIN` VARCHAR(6) NOT NULL,
+  PRIMARY KEY (`card_id`),
+  CONSTRAINT `fk_card_master_customer_id` FOREIGN KEY (`customer_id`) REFERENCES `customer_master` (`id`),
+  CONSTRAINT `fk_card_master_BIN` FOREIGN KEY (`BIN`) REFERENCES `BIN_master` (`BIN`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE `card_txns` (
   `txn_id` VARCHAR(12) NOT NULL,
   `amt` DECIMAL(12,2) NOT NULL,
@@ -66,6 +76,7 @@ CREATE TABLE `card_txns` (
   `acquirer_id` VARCHAR(10) NOT NULL,
   `merchant_id` VARCHAR(10) NOT NULL,
   `customer_id` VARCHAR(10) NOT NULL,
+  `card_id` VARCHAR(10) NOT NULL,
   `BIN` VARCHAR(6) NOT NULL,
   `country` VARCHAR(2) NOT NULL,
   `location` VARCHAR(50) NOT NULL,
@@ -75,6 +86,7 @@ CREATE TABLE `card_txns` (
   CONSTRAINT `fk_card_txns_acquirer_id` FOREIGN KEY (`acquirer_id`) REFERENCES `acquirer_master` (`id`),
   CONSTRAINT `fk_card_txns_merchant_id` FOREIGN KEY (`merchant_id`) REFERENCES `merchant_master` (`merchant_id`),
   CONSTRAINT `fk_card_txns_customer_id` FOREIGN KEY (`customer_id`) REFERENCES `customer_master` (`id`),
+  CONSTRAINT `fk_card_txns_card_id` FOREIGN KEY (`card_id`) REFERENCES `card_master` (`card_id`),
   CONSTRAINT `fk_card_txns_BIN` FOREIGN KEY (`BIN`) REFERENCES `BIN_master` (`BIN`),
   CONSTRAINT `fk_card_txns_response_code` FOREIGN KEY (`response_code`) REFERENCES `response_master` (`response_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
