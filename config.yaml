@@ -1,0 +1,331 @@
+# =====================================================================
+# config.yaml — semantic layer for the NL->DSL->SQL compiler
+# Single source of truth. The parser, validator, codegen, response
+# layer, and the LLM grounding step all read from this file.
+# Adding a new metric/dimension/KPI = editing this file, NOT the compiler.
+# Dialect: MySQL 8.  Dates are stored as strings 'YYYY-MM-DD'.
+# =====================================================================
+
+dialect: mysql
+
+# Reference "today". The dataset is historical (2025), so periods
+# (FTD/WTD/MTD/QTD/YTD/rolling) are anchored to the latest txn date,
+# not the wall clock. Left null -> computed at runtime as
+# MAX(card_txns.date). Pin a string here to freeze it for tests.
+reference_date: null
+
+fact:
+  table: card_txns
+  alias: t
+  date_column: date        # string 'YYYY-MM-DD'; month key = SUBSTRING(date,1,7)
+  amount_column: amt
+  card_id_column: card_id
+  customer_id_column: customer_id
+
+# ---------------------------------------------------------------------
+# JOIN REGISTRY
+# How to reach each master from the fact. The validator uses this for
+# reachability; codegen emits exactly these ON clauses. Table names are
+# case-sensitive on Linux/Docker MySQL — match the schema exactly.
+# customer_master is deliberately NOT here: the `customer` dimension
+# resolves to the masked t.customer_id and never joins to PII columns.
+# ---------------------------------------------------------------------
+joins:
+  # "on" is quoted: unquoted, YAML 1.1 loaders (PyYAML) read it as boolean True.
+  issuer_master:    { alias: i, "on": "t.issuer_id = i.id" }
+  acquirer_master:  { alias: a, "on": "t.acquirer_id = a.id" }
+  BIN_master:       { alias: b, "on": "t.BIN = b.BIN" }
+  merchant_master:  { alias: m, "on": "t.merchant_id = m.merchant_id" }
+  response_master:  { alias: r, "on": "t.response_code = r.response_code" }
+  card_master:      { alias: c, "on": "t.card_id = c.card_id" }
+
+# ---------------------------------------------------------------------
+# METRICS
+#   sql                     : aggregate expression (t = fact alias)
+#   default_success_filter  : if true, restrict to TD_BD='Success' UNLESS
+#                             the query references an outcome dimension
+#                             (status/response) — see semantics.implicit_success
+#   requires_join           : joins this metric always needs
+#   unit_scalable           : may be divided by lakh/crore via IN clause
+#   money                   : monetary metric (affects unit + success default)
+# NOTE: value = SUM(amt), volume = COUNT(*).  (Payments convention.)
+# ---------------------------------------------------------------------
+metrics:
+
+  volume:
+    sql: "COUNT(*)"
+    default_success_filter: false      # counts ALL attempts by default
+    money: false
+    label: "Volume (transaction count)"
+
+  value:
+    sql: "SUM(t.amt)"
+    default_success_filter: true
+    unit_scalable: true
+    money: true
+    label: "Value (₹)"
+
+  ats:                                  # average ticket size = value / volume
+    sql: "SUM(t.amt) / NULLIF(COUNT(*),0)"
+    default_success_filter: true
+    unit_scalable: true
+    money: true
+    label: "Average ticket size (₹)"
+
+  spend_per_card:
+    sql: "SUM(t.amt) / NULLIF(COUNT(DISTINCT t.card_id),0)"
+    default_success_filter: true
+    unit_scalable: true
+    money: true
+    label: "Spend per card (₹)"
+
+  spend_per_customer:
+    sql: "SUM(t.amt) / NULLIF(COUNT(DISTINCT t.customer_id),0)"
+    default_success_filter: true
+    unit_scalable: true
+    money: true
+    label: "Spend per customer (₹)"
+
+  active_cards:
+    sql: "COUNT(DISTINCT t.card_id)"
+    default_success_filter: false
+    money: false
+    label: "Active cards"
+
+  active_card_rate:                     # active cards / total cards issued
+    sql: "COUNT(DISTINCT t.card_id) / (SELECT COUNT(*) FROM card_master)"
+    default_success_filter: false
+    money: false
+    label: "Active card rate"
+    note: "denominator = total rows in card_master"
+
+  success_rate:
+    sql: "SUM(CASE WHEN r.TD_BD = 'Success' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0)"
+    requires_join: [response_master]
+    default_success_filter: false       # computed OVER all txns, never pre-filtered
+    money: false
+    label: "Success rate"
+
+  business_decline_rate:
+    sql: "SUM(CASE WHEN r.TD_BD = 'Business Decline' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0)"
+    requires_join: [response_master]
+    default_success_filter: false
+    money: false
+    label: "Business decline rate"
+
+  technical_decline_rate:
+    sql: "SUM(CASE WHEN r.TD_BD = 'Technical Decline' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0)"
+    requires_join: [response_master]
+    default_success_filter: false
+    money: false
+    label: "Technical decline rate"
+
+# ---------------------------------------------------------------------
+# DIMENSIONS
+#   requires_join      : joins needed to expose this dimension
+#   select / group_by  : SQL fragments
+#   time_dimension     : ordered; default chart = LINE
+#   outcome_dimension  : referencing it SUPPRESSES the implicit success
+#                        filter (this is what makes success-vs-decline work)
+#   pii                : resolves to a masked id; raw PII columns are blocked
+# ---------------------------------------------------------------------
+dimensions:
+
+  issuer:
+    requires_join: [issuer_master]
+    select: "i.iss_name"
+    group_by: "i.iss_name"
+    label: "Issuer"
+
+  acquirer:
+    requires_join: [acquirer_master]
+    select: "a.acq_name"
+    group_by: "a.acq_name"
+    label: "Acquirer"
+
+  merchant:
+    requires_join: [merchant_master]
+    select: "m.name"
+    group_by: "m.name"
+    label: "Merchant"
+
+  mcc:                                  # merchant category (MCC) — unified
+    requires_join: [merchant_master]
+    select: "m.mcc_code, m.mcc_description"
+    group_by: "m.mcc_code, m.mcc_description"
+    aliases: [merchant_category, category]
+    label: "Merchant category (MCC)"
+
+  card_type:                            # Credit / Debit / Prepaid (from BIN)
+    requires_join: [BIN_master]
+    select: "b.card_type"
+    group_by: "b.card_type"
+    label: "Card type"
+
+  card_variant:                         # Classic / Business / Platinum
+    requires_join: [BIN_master]
+    select: "b.card_variant"
+    group_by: "b.card_variant"
+    label: "Card variant"
+
+  card:                                 # masked card id, no join needed
+    select: "t.card_id"
+    group_by: "t.card_id"
+    label: "Card"
+
+  customer:                             # masked customer id — PII-safe
+    select: "t.customer_id"
+    group_by: "t.customer_id"
+    pii: true
+    label: "Customer"
+    note: "resolves to masked customer_id only; name/phone/address are blocked"
+
+  status:                               # TD_BD class
+    requires_join: [response_master]
+    select: "r.TD_BD"
+    group_by: "r.TD_BD"
+    outcome_dimension: true
+    label: "Status (Success / Business Decline / Technical Decline)"
+
+  response:                             # response/error code level
+    requires_join: [response_master]
+    select: "r.response_code, r.response_description"
+    group_by: "r.response_code, r.response_description"
+    outcome_dimension: true
+    aliases: [error_code, error]
+    label: "Response / error code"
+
+  month:
+    select: "SUBSTRING(t.date,1,7)"
+    group_by: "SUBSTRING(t.date,1,7)"
+    time_dimension: true
+    default_order: asc
+    label: "Month (YYYY-MM)"
+
+  country:
+    select: "t.country"
+    group_by: "t.country"
+    label: "Country"
+
+  location:
+    select: "t.location"
+    group_by: "t.location"
+    label: "Location (city)"
+
+# ---------------------------------------------------------------------
+# MODIFIERS  (the 5 knobs; details enforced in grammar.md)
+# ---------------------------------------------------------------------
+modifiers:
+
+  filter:                               # WHERE dim = 'value' [AND ...]
+    operator: "="
+    combiner: "AND"
+
+  period:                               # PERIOD <spec>; anchored to reference_date
+    # codegen PRE-COMPUTES boundary dates as string literals in Python
+    # (because `date` is a string column) and emits plain string comparisons
+    # like:  t.date >= '2025-12-01' AND t.date <= '<reference_date>'
+    specs: [FTD, WTD, MTD, QTD, YTD, "LAST <n> DAYS"]
+    meaning:
+      FTD: "for the day = reference_date only"
+      WTD: "week-to-date: Monday of ref week .. reference_date"
+      MTD: "month-to-date: 1st of ref month .. reference_date"
+      QTD: "quarter-to-date: 1st of ref quarter .. reference_date"
+      YTD: "year-to-date: 1st of ref year .. reference_date"
+      "LAST <n> DAYS": "rolling window: (reference_date - n days) .. reference_date"
+
+  top_n:                                # ORDER BY <metric|dim> DESC LIMIT n
+    default_direction: DESC
+
+  unit:                                 # IN CRORE | IN LAKH — divides the metric value
+    crore: 10000000
+    lakh: 100000
+    applies_to: "metrics with unit_scalable: true"
+
+  chart:                                # AS TABLE|KPI|BAR|LINE|PIE (optional override)
+    types: [TABLE, KPI, BAR, LINE, PIE]
+
+# ---------------------------------------------------------------------
+# SEMANTICS — the non-obvious rules codegen must apply
+# ---------------------------------------------------------------------
+semantics:
+
+  implicit_success:
+    rule: >
+      For any metric with default_success_filter: true, restrict to
+      TD_BD='Success' (adds a response_master join) — EXCEPT when the
+      query references an outcome dimension (status/response) in BY or
+      WHERE. In that case the default is SUPPRESSED so success-vs-decline
+      comparisons are possible.
+    also_apply_when: >
+      The user explicitly says successful/valid transactions for a
+      count metric (volume/active_cards): add the success filter even
+      though its default is false.
+    emits_assumption: success_default
+
+  mixed_metrics:
+    rule: >
+      When one query mixes success-defaulted metrics (value/ats/spend_*)
+      with a non-defaulted one (volume/active_cards), DO NOT put the
+      success filter in WHERE (that would wrongly shrink volume). Instead
+      apply it via conditional aggregation inside the success-defaulted
+      metric only, e.g.
+        value = SUM(CASE WHEN r.TD_BD='Success' THEN t.amt ELSE 0 END)
+      so volume still counts all attempts in the same query.
+    emits_assumption: mixed_metrics
+
+  unit_scaling:
+    rule: "IN CRORE|LAKH divides each unit_scalable metric's value by the divisor."
+    emits_assumption: unit
+
+  period_anchor:
+    rule: "All periods computed against reference_date (= MAX date in data)."
+    emits_assumption: period_anchor
+
+# ---------------------------------------------------------------------
+# CHART INFERENCE
+# Default chart from result SHAPE; explicit AS overrides if compatible.
+# ---------------------------------------------------------------------
+chart:
+  default_rules:
+    - { when: "result has exactly 1 row",              then: TABLE }
+    - { when: "0 dimensions",                          then: KPI }
+    - { when: "1 time dimension",                      then: LINE }
+    - { when: "1 dimension AND categories <= pie_max", then: BAR }   # PIE also allowed
+    - { when: "1 dimension AND categories >  pie_max", then: BAR }
+    - { when: "2+ dimensions OR 2+ metrics",           then: TABLE }
+  pie_max_categories: 8
+  precedence: >
+    An explicit AS <chart> wins IF compatible with the result shape
+    (e.g. PIE needs exactly 1 dimension and <= pie_max categories,
+    parts of one whole). If incompatible, fall back to the inferred
+    default and emit the chart_fallback assumption.
+
+# ---------------------------------------------------------------------
+# ASSUMPTIONS — appended to response.assumptions[] as the compiler
+# injects defaults / conversions / fallbacks. Shown in the audit panel.
+# ---------------------------------------------------------------------
+assumptions:
+  success_default:  "Only successful transactions considered."
+  mixed_metrics:    "Value-based metrics count only successful transactions; volume counts all attempts."
+  unit_crore:       "Value shown in ₹ crore."
+  unit_lakh:        "Value shown in ₹ lakh."
+  period_anchor:    "Period computed relative to the latest transaction date ({ref}), as the dataset is historical."
+  chart_fallback:   "Requested {requested} chart isn't suitable for this result; showing {actual} instead."
+  forced_limit:     "No limit given; results capped at {limit} rows."
+  active_card_denom: "Active-card rate uses total cards in card_master as the denominator."
+
+# ---------------------------------------------------------------------
+# GUARDRAILS
+# ---------------------------------------------------------------------
+guardrails:
+  read_only: true                       # SELECT only; reject any DML/DDL
+  forced_limit: 1000                    # applied when no LIMIT is present
+  pii_blocked_columns:                  # never selectable, even if asked
+    - customer_master.name
+    - customer_master.phone_number
+    - customer_master.address
+  scope: >
+    Every query must resolve to known metric(s) + dimension(s) in this
+    config. Anything that can't be grounded is rejected (out of scope)
+    rather than guessed.
