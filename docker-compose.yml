@@ -1,0 +1,15 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: nl2sql-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: card_analytics
+    ports:
+      - "3307:3306"  # host 3306 is taken by the local MySQL80 service
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./output:/docker-entrypoint-initdb.d
+
+volumes:
+  mysql_data:

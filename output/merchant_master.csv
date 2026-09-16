@@ -1,0 +1,21 @@
+merchant_id,acquirer_id,name,mcc_code,mcc_description
+MER0001,ACQ001,FreshBasket Supermart,5411,Grocery Stores and Supermarkets
+MER0002,ACQ002,Spice Route Kitchen,5812,Eating Places and Restaurants
+MER0003,ACQ003,Highway Fuel Point,5541,Service Stations
+MER0004,ACQ004,Metro Lifestyle Department Store,5311,Department Stores
+MER0005,ACQ005,CityLink Metro Rail,4111,Local and Suburban Commuter Transport
+MER0006,ACQ001,WellCare Pharmacy,5912,Drug Stores and Pharmacies
+MER0007,ACQ002,Digital Planet Electronics,5732,Electronics Stores
+MER0008,ACQ003,Seaview Grand Hotel,7011,Lodging - Hotels
+MER0009,ACQ004,StreamBox Digital TV,4899,"Cable, Satellite and Streaming Services"
+MER0010,ACQ005,Artisan Gift Emporium,5999,Miscellaneous and Specialty Retail
+MER0011,ACQ001,Daily Needs Grocery Mart,5411,Grocery Stores and Supermarkets
+MER0012,ACQ002,Tandoor Nights Restaurant,5812,Eating Places and Restaurants
+MER0013,ACQ003,GreenLine Service Station,5541,Service Stations
+MER0014,ACQ004,Central Bazaar Stores,5311,Department Stores
+MER0015,ACQ005,Urban Commute Bus Services,4111,Local and Suburban Commuter Transport
+MER0016,ACQ001,MediPlus Chemists,5912,Drug Stores and Pharmacies
+MER0017,ACQ002,Gadget Hub Electronics,5732,Electronics Stores
+MER0018,ACQ003,Heritage Residency Hotel,7011,Lodging - Hotels
+MER0019,ACQ004,SkyWave Cable Network,4899,"Cable, Satellite and Streaming Services"
+MER0020,ACQ005,Curio Corner Specialty Retail,5999,Miscellaneous and Specialty Retail

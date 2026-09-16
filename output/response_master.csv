@@ -1,0 +1,14 @@
+response_code,response_description,TD_BD
+00,Approved,Success
+05,Do not honor,Business Decline
+14,Invalid card number,Business Decline
+41,Lost card,Business Decline
+43,Stolen card,Business Decline
+51,Insufficient funds,Business Decline
+54,Expired card,Business Decline
+57,Transaction not permitted to cardholder,Business Decline
+61,Exceeds withdrawal amount limit,Business Decline
+68,Response received too late (timeout),Technical Decline
+91,Issuer or switch inoperative,Technical Decline
+92,Financial institution not found (routing error),Technical Decline
+96,System malfunction,Technical Decline
