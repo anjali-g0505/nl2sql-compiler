@@ -8,6 +8,9 @@ app/
   main.py        FastAPI app: /health, /test-query
   db.py          MySQL connection pool + execute_query() (raw SQL, no ORM)
   config.py      Settings read from environment / .env
+  lexer.py       DSL string -> token list (no parser/AST yet)
+tests/
+  test_lexer.py  pytest suite for the lexer
 config.yaml      Semantic layer (metrics, dimensions, joins) — source of truth
 grammar.md       Frozen DSL spec + NL -> DSL -> SQL oracle
 generate_data.py Deterministic synthetic data -> output/*.csv, output/*.sql
@@ -72,3 +75,38 @@ Interactive docs: http://127.0.0.1:8000/docs
 
 If MySQL is unreachable or the query fails, `/test-query` returns HTTP 500 with
 `{"error": "database_error", "detail": "..."}`; the full error is in the uvicorn log.
+
+## Running the tests
+
+The tests are pure Python and need neither the database nor a running API, so steps
+1, 2, 4 and 5 above are not required.
+
+### Install dev dependencies (once)
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
+
+`requirements-dev.txt` pulls in `requirements.txt` plus pytest, so this also covers
+step 3. Pytest is kept out of `requirements.txt` so production installs stay lean.
+
+### Run
+
+From the repo root:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q                                  # everything
+.\.venv\Scripts\python.exe -m pytest tests/test_lexer.py -v              # one file, per-test output
+.\.venv\Scripts\python.exe -m pytest tests/test_lexer.py::test_e4_filter # one test
+.\.venv\Scripts\python.exe -m pytest -k period -v                        # tests whose name matches
+```
+
+Use `python -m pytest` rather than bare `pytest`: running it as a module from the repo
+root puts the root on `sys.path`, which is what lets the tests `import app.lexer`.
+Bare `pytest` can fail with `ModuleNotFoundError: No module named 'app'`.
+
+### What's covered
+
+| File | Covers |
+|---|---|
+| `tests/test_lexer.py` | Token sequences for the `grammar.md` oracle strings (E1, E2, E4–E8, E10, E14), case handling, positions, whitespace, string literals, and `LexError` cases (unterminated strings, numbers glued to words, unexpected characters) |
