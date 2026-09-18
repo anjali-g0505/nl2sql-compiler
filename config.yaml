@@ -232,7 +232,8 @@ modifiers:
       MTD: "month-to-date: 1st of ref month .. reference_date"
       QTD: "quarter-to-date: 1st of ref quarter .. reference_date"
       YTD: "year-to-date: 1st of ref year .. reference_date"
-      "LAST <n> DAYS": "rolling window: (reference_date - n days) .. reference_date"
+      # exactly n days, both ends inclusive: LAST 1 DAYS == FTD
+      "LAST <n> DAYS": "rolling window: (reference_date - (n-1) days) .. reference_date"
 
   top_n:                                # ORDER BY <metric|dim> DESC LIMIT n
     default_direction: DESC
@@ -276,7 +277,7 @@ semantics:
 
   unit_scaling:
     rule: "IN CRORE|LAKH divides each unit_scalable metric's value by the divisor."
-    emits_assumption: unit
+    emits_assumption: [unit_crore, unit_lakh]  # the one matching the IN clause
 
   period_anchor:
     rule: "All periods computed against reference_date (= MAX date in data)."
@@ -287,13 +288,14 @@ semantics:
 # Default chart from result SHAPE; explicit AS overrides if compatible.
 # ---------------------------------------------------------------------
 chart:
+  # Rules are evaluated top to bottom; the first match wins.
   default_rules:
-    - { when: "result has exactly 1 row",              then: TABLE }
-    - { when: "0 dimensions",                          then: KPI }
+    - { when: "0 dimensions AND 1 metric",             then: KPI }     # a single value
+    - { when: "result has exactly 1 row",              then: TABLE }   # incl. 0 dims + 2+ metrics
+    - { when: "2+ dimensions OR 2+ metrics",           then: TABLE }   # before the 1-dim rules
     - { when: "1 time dimension",                      then: LINE }
-    - { when: "1 dimension AND categories <= pie_max", then: BAR }   # PIE also allowed
+    - { when: "1 dimension AND categories <= pie_max", then: BAR }     # PIE also allowed
     - { when: "1 dimension AND categories >  pie_max", then: BAR }
-    - { when: "2+ dimensions OR 2+ metrics",           then: TABLE }
   pie_max_categories: 8
   precedence: >
     An explicit AS <chart> wins IF compatible with the result shape

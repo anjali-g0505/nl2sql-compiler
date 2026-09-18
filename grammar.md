@@ -86,7 +86,9 @@ money metric only: `SUM(CASE WHEN r.TD_BD='Success' THEN t.amt ELSE 0 END)`. Ass
 **Period anchoring.** `reference_date = MAX(card_txns.date)` (the data is historical, so
 wall-clock "MTD" would be empty). Because `date` is a string column, codegen
 **pre-computes** the period's boundary dates as string literals in Python and emits plain
-string comparisons (`t.date >= '2025-12-01'`) rather than SQL date functions. Assumption
+string comparisons (`t.date >= '2025-12-01'`) rather than SQL date functions. Every
+window includes both ends; `LAST n DAYS` covers exactly n days ending on the reference
+date (start = reference_date − (n−1) days). Assumption
 records the anchor date. *(Examples below assume `reference_date = '2025-12-27'`; your
 real value is whatever `MAX(date)` is.)*
 
@@ -96,8 +98,9 @@ records it.
 **Customer is PII-safe.** The `customer` dimension resolves to `t.customer_id` (a masked
 id), never to name/phone/address. Those columns are blocked by guardrails.
 
-**Chart type.** If `AS` is absent, infer from shape: a single-row result → TABLE (or KPI if it's one value), overriding the dimension rules; otherwise 0 dims → KPI, 1 time dim → LINE,
-1 dim → BAR (PIE if ≤ 8 categories), 2+ dims or 2+ metrics → TABLE. If `AS` is present and
+**Chart type.** If `AS` is absent, infer from shape, first match wins: 0 dims + 1 metric →
+KPI; any other single-row result → TABLE, overriding the dimension rules; 2+ dims or
+2+ metrics → TABLE; 1 time dim → LINE; 1 dim → BAR (PIE if ≤ 8 categories). If `AS` is present and
 compatible with the shape it wins; otherwise fall back and record a `chart_fallback`
 assumption.
 
@@ -276,7 +279,7 @@ DSL:  SHOW active_card_rate PERIOD LAST 90 DAYS
 ```sql
 SELECT COUNT(DISTINCT t.card_id) / (SELECT COUNT(*) FROM card_master) AS active_card_rate
 FROM card_txns t
-WHERE t.date >= '2025-09-28' AND t.date <= '2025-12-27';
+WHERE t.date >= '2025-09-29' AND t.date <= '2025-12-27';
 ```
 chart_type: `KPI` (inferred) · assumptions: [period_anchor, active_card_denom]
 
