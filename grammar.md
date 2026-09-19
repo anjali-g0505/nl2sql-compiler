@@ -18,6 +18,7 @@ query      := SHOW metric_list
               [ BY dimension_list ]
               [ WHERE condition_list ]
               [ PERIOD period_spec ]
+              [ HAVING having_list ]
               [ ORDER BY sort_key (ASC | DESC) ]
               [ LIMIT integer ]
               [ IN unit ]
@@ -26,21 +27,45 @@ query      := SHOW metric_list
 metric_list    := metric (',' metric)*
 dimension_list := dimension (',' dimension)*
 condition_list := condition (AND condition)*
-condition      := dimension '=' string_literal
+condition      := dimension ('=' | '!=') string_literal
+                | dimension [NOT] IN '(' string_literal (',' string_literal)* ')'
+                | attribute comp_op number
+having_list    := having_cond (AND having_cond)*
+having_cond    := metric comp_op number
+comp_op        := '=' | '!=' | '>' | '>=' | '<' | '<='
+number         := integer | decimal          (decimal = digits '.' digits, e.g. 0.9)
 sort_key       := metric | dimension
-period_spec    := FTD | WTD | MTD | QTD | YTD | LAST integer DAYS
+period_spec    := FTD | WTD | MTD | QTD | YTD
+                | LAST integer DAYS
+                | FROM date_literal TO date_literal
+date_literal   := string_literal in 'YYYY-MM-DD' form, a real calendar date
 unit           := CRORE | LAKH
 chart_type     := TABLE | KPI | BAR | LINE | PIE
 
 metric     := <any key under metrics: in config.yaml>
 dimension  := <any key/alias under dimensions: in config.yaml>
+attribute  := <any key/alias under attributes: in config.yaml>
 ```
+
+The parser tells the `condition` forms apart by what follows the name (quoted text, a
+parenthesised list, or a number), since it doesn't read config; the validator then checks
+the name really is a dimension or an attribute respectively.
+
+`IN` has two uses and the parser tells them apart by position: directly after a field in
+`WHERE`, followed by `(`, it opens a list (`card_type IN ('Credit', 'Debit')`); as its own
+clause near the end, followed by `CRORE`/`LAKH`, it is the unit.
+
+Not-equal is written only as `!=`; `<>` is rejected by the lexer with a hint, so each
+operator has exactly one spelling. Codegen emits the standard SQL `<>`. `OR`, `BETWEEN`,
+`LIKE` and `IS [NOT] NULL` are deliberately not supported: `IN` covers the common
+same-field `OR`; a numeric range is `amount >= x AND amount <= y` and a date range is
+`PERIOD FROM … TO`; `LIKE` would invite guessed values; and every column is `NOT NULL`.
 
 Only `SHOW <metric_list>` is required. Every other clause is optional. Clause order is
 fixed as written above.
 
 The parser produces an **AST** with two kinds of information:
-- **what to compute** — `metrics`, `dimensions`, `filters`, `period`, `order`, `limit`, `unit`
+- **what to compute** — `metrics`, `dimensions`, `filters`, `period`, `having`, `order`, `limit`, `unit`
 - **how to present** — `chart_type` (from the `AS` clause, or `null` if absent)
 
 Codegen consumes only the first kind. The `chart_type` field is carried on the AST but
@@ -48,12 +73,13 @@ Codegen consumes only the first kind. The `chart_type` field is carried on the A
 
 ---
 
-## 2. The 5 modifiers
+## 2. The 6 modifiers
 
 | Modifier | Clause | Effect |
 |---|---|---|
-| filter | `WHERE dim = '...' [AND ...]` | adds `WHERE`, pulls in any join the dimension needs |
-| period | `PERIOD MTD` etc. | adds a date-range filter, anchored to `reference_date` |
+| filter | `WHERE dim = '...'` / `WHERE attr > n` `[AND ...]` | adds `WHERE` (row-level, before aggregation), pulls in any join the dimension needs |
+| period | `PERIOD MTD` etc. / `PERIOD FROM '...' TO '...'` | adds a date-range filter: relative specs anchor to `reference_date`, `FROM … TO` is absolute |
+| threshold | `HAVING metric > n [AND ...]` | adds `HAVING`: keeps only groups whose aggregated metric passes |
 | top-N | `ORDER BY <key> DESC LIMIT n` | ranking |
 | unit | `IN CRORE` / `IN LAKH` | divides each `unit_scalable` metric's value |
 | chart | `AS PIE` etc. | overrides the inferred chart type (if compatible) |
@@ -88,12 +114,63 @@ wall-clock "MTD" would be empty). Because `date` is a string column, codegen
 **pre-computes** the period's boundary dates as string literals in Python and emits plain
 string comparisons (`t.date >= '2025-12-01'`) rather than SQL date functions. Every
 window includes both ends; `LAST n DAYS` covers exactly n days ending on the reference
-date (start = reference_date − (n−1) days). Assumption
-records the anchor date. *(Examples below assume `reference_date = '2025-12-27'`; your
-real value is whatever `MAX(date)` is.)*
+date (start = reference_date − (n−1) days). The `period_anchor` assumption records the
+anchor date. *(Examples below assume `reference_date = '2025-12-27'`; your real value is
+whatever `MAX(date)` is.)*
+
+**Window size is always stated.** "Last n days" and "from X to Y" are easy to read as off
+by one, so the audit panel spells out the exact window:
+- `LAST n DAYS` also emits `last_n_days_window`: *"Last 90 days = 2025-12-27 (treated as
+  today) plus the 89 days before it: 2025-09-29 to 2025-12-27."*
+- `FROM … TO` emits `date_range_inclusive`: *"Date range includes both ends: 2025-05-12
+  to 2025-06-14, inclusive."*
+
+**Explicit date ranges.** `PERIOD FROM '2025-05-12' TO '2025-06-14'` is absolute: it is
+**not** anchored to `reference_date`, so it emits no `period_anchor` assumption (only
+`date_range_inclusive`). Both ends are inclusive. Each date must be a real calendar date in strict `YYYY-MM-DD` form, and
+start must not be after end (`'2025-02-30'`, `'12/05/2025'` and reversed ranges are
+errors). The parser converts the strings to dates and codegen re-emits them with
+`isoformat()`, so only a well-formed date literal can reach the SQL — a value like
+`'2025-05-12 OR 1=1'` fails conversion instead of being injected. For the NL→DSL step:
+*"in May 2025"* → `FROM '2025-05-01' TO '2025-05-31'`; a date without a year takes the
+year of `reference_date`; relative phrases ("this month", "last 30 days") stay relative
+specs (`MTD`, `LAST 30 DAYS`), because the LLM doesn't know `reference_date`.
 
 **Units.** `IN CRORE|LAKH` divides each `unit_scalable` metric by 1e7 / 1e5. Assumption
 records it.
+
+**WHERE vs HAVING.** The split is *before vs after aggregation*:
+- `WHERE` filters **rows**, by row-level fields: **dimensions** with `=` and quoted text
+  (`card_type = 'Credit'`), and numeric **attributes** with any `comp_op`
+  (`amount > 100000000`). Attributes (config `attributes:`) are per-transaction numbers:
+  never grouped by, never aggregated.
+- `HAVING` filters **groups**, by **aggregated metrics** after `GROUP BY`
+  (`value > 30000` is a `SUM`).
+- Never the reverse: a metric in `WHERE` is rejected with a hint to use `HAVING`, and a
+  dimension or attribute in `HAVING` with a hint to use `WHERE`. *"Transactions over 10
+  crore"* is `WHERE amount > …` (each row); *"customers whose total is over 10 crore"* is
+  `HAVING value > …` (each group).
+- Text dimensions allow `=`, `!=`, `IN (...)` and `NOT IN (...)`; attributes allow every
+  `comp_op`. Attributes take numbers, dimensions take text (`amount > 'abc'`,
+  `card_type = 5`, `card_type > 'Credit'` are rejected).
+- `status != 'Success'` or `status NOT IN (...)` still references an outcome dimension, so
+  the implicit success filter is suppressed — "show me the declines" works as expected.
+- **Dates are filtered only by `PERIOD`**, never in `WHERE`, so two date filters can't
+  contradict each other.
+
+Further rules for `HAVING`, enforced by the validator:
+- `HAVING` requires `BY` (with no dimensions there are no groups to filter).
+- Each `HAVING` metric must also appear in `SHOW`, so codegen emits it by its alias
+  (`HAVING value > 30000`, as MySQL allows) and the user sees the value being filtered.
+
+**Money thresholds are in the query's display unit** — in `WHERE` and `HAVING` alike, so
+the NL→DSL step has a single rule: every money number in a query is written in the `IN`
+unit. *"More than 3 crore"* → `> 3 ... IN CRORE`; *"more than 30000000 rupees"* →
+`> 30000000` with no `IN`; *"above 3 crore, shown in lakh"* → `> 300 ... IN LAKH`.
+- In `HAVING` this falls out of the alias, which is already scaled.
+- In `WHERE`, the `amt` column is always stored in rupees, so codegen multiplies the
+  threshold by the divisor in Python (with `Decimal`, exactly) and emits the rupee value:
+  `WHERE amount > 10 ... IN CRORE` → `t.amt > 100000000`.
 
 **Customer is PII-safe.** The `customer` dimension resolves to `t.customer_id` (a masked
 id), never to name/phone/address. Those columns are blocked by guardrails.
@@ -105,7 +182,7 @@ compatible with the shape it wins; otherwise fall back and record a `chart_fallb
 assumption.
 
 **Guardrails.** SELECT-only; a `LIMIT` is forced (config `forced_limit`) when none is
-given; queries that don't ground to known metrics/dimensions are rejected.
+given; queries that don't ground to known metrics/dimensions/attributes are rejected.
 
 ---
 
@@ -281,7 +358,7 @@ SELECT COUNT(DISTINCT t.card_id) / (SELECT COUNT(*) FROM card_master) AS active_
 FROM card_txns t
 WHERE t.date >= '2025-09-29' AND t.date <= '2025-12-27';
 ```
-chart_type: `KPI` (inferred) · assumptions: [period_anchor, active_card_denom]
+chart_type: `KPI` (inferred) · assumptions: [period_anchor, last_n_days_window, active_card_denom]
 
 ---
 
@@ -355,11 +432,107 @@ chart_type: `TABLE` (inferred; 3 metrics) · assumptions: [mixed_metrics]
 
 ---
 
+**E15 — threshold on an aggregate.** *"Customers who made payments of more than 30000."*
+```
+DSL:  SHOW value BY customer HAVING value > 30000 ORDER BY value DESC
+```
+```sql
+SELECT t.customer_id, SUM(t.amt) AS value
+FROM card_txns t
+JOIN response_master r ON t.response_code = r.response_code
+WHERE r.TD_BD = 'Success'
+GROUP BY t.customer_id
+HAVING value > 30000
+ORDER BY value DESC;
+```
+chart_type: `BAR` (inferred; >8 categories) · assumptions: [success_default]
+*`value` is a metric, so the threshold goes in `HAVING`, after grouping — each customer's total, not each transaction.*
+
+---
+
+**E16 — threshold in the display unit.** *"Merchants with more than 3 crore this month, in crore."*
+```
+DSL:  SHOW value BY merchant PERIOD MTD HAVING value > 3 IN CRORE
+```
+```sql
+SELECT m.name, SUM(t.amt) / 10000000 AS value
+FROM card_txns t
+JOIN merchant_master m ON t.merchant_id = m.merchant_id
+JOIN response_master r ON t.response_code = r.response_code
+WHERE r.TD_BD = 'Success'
+  AND t.date >= '2025-12-01' AND t.date <= '2025-12-27'
+GROUP BY m.name
+HAVING value > 3;
+```
+chart_type: `BAR` (inferred) · assumptions: [success_default, unit_crore, period_anchor]
+*`IN CRORE` scales the threshold too: the alias `value` is already in crore, so `> 3` means more than ₹3 crore.*
+
+---
+
+**E17 — explicit date range.** *"Total value from 12 May to 14 June 2025."*
+```
+DSL:  SHOW value PERIOD FROM '2025-05-12' TO '2025-06-14'
+```
+```sql
+SELECT SUM(t.amt) AS value
+FROM card_txns t
+JOIN response_master r ON t.response_code = r.response_code
+WHERE r.TD_BD = 'Success'
+  AND t.date >= '2025-05-12' AND t.date <= '2025-06-14';
+```
+chart_type: `KPI` (inferred) · assumptions: [success_default, date_range_inclusive]
+*No `period_anchor`: an explicit range is absolute. Both ends are included, and
+`date_range_inclusive` says so.*
+
+---
+
+**E18 — row-level numeric filter.** *"List the transactions above 10 crore."*
+```
+DSL:  SHOW value BY txn WHERE amount > 100000000 AS TABLE
+```
+```sql
+SELECT t.txn_id, SUM(t.amt) AS value
+FROM card_txns t
+JOIN response_master r ON t.response_code = r.response_code
+WHERE t.amt > 100000000
+  AND r.TD_BD = 'Success'
+GROUP BY t.txn_id;
+```
+chart_type: `TABLE` (explicit; compatible) · assumptions: [success_default]
+*`amount` is an attribute, so it goes in `WHERE` (each transaction), not `HAVING`. Grouping
+by the primary key gives one row per transaction. Written in crore —
+`SHOW value BY txn WHERE amount > 10 IN CRORE AS TABLE` — the `WHERE` line is identical
+(codegen converts 10 crore back to rupees); only the displayed `value` becomes
+`SUM(t.amt) / 10000000`, plus the `unit_crore` assumption.*
+
+---
+
+**E19 — list membership and not-equal.** *"Declined volume on credit and debit cards, by issuer."*
+```
+DSL:  SHOW volume BY issuer WHERE card_type IN ('Credit', 'Debit') AND status != 'Success'
+```
+```sql
+SELECT i.iss_name, COUNT(*) AS volume
+FROM card_txns t
+JOIN issuer_master i ON t.issuer_id = i.id
+JOIN BIN_master b ON t.BIN = b.BIN
+JOIN response_master r ON t.response_code = r.response_code
+WHERE b.card_type IN ('Credit', 'Debit')
+  AND r.TD_BD <> 'Success'
+GROUP BY i.iss_name;
+```
+chart_type: `BAR` (inferred) · assumptions: [] *(volume, no default; `status` referenced)*
+*`!=` becomes SQL's `<>`. The negated form works the same way:
+`WHERE card_type NOT IN ('Prepaid')` → `b.card_type NOT IN ('Prepaid')`.*
+
+---
+
 ## 6. Coverage check
 
-Between E1–E14 the oracle exercises every mechanism at least once: no-join scalar, single
-join, two joins, ≥3 joins, month key, all 5 modifiers (filter, period, top-N, unit,
-chart), the implicit-success default **and** its suppression, opt-in vs no-default counts,
+Between E1–E19 the oracle exercises every mechanism at least once: no-join scalar, single
+join, two joins, ≥3 joins, month key, all 6 modifiers (filter, period, threshold, top-N,
+unit, chart), `HAVING` thresholds in rupees and in the display unit, relative periods and an
+explicit `FROM … TO` range, a numeric attribute in `WHERE`, `IN` lists and `!=`, the implicit-success default **and** its suppression, opt-in vs no-default counts,
 mixed-metric conditional aggregation, PII-safe customer, and every chart path (KPI, LINE,
 BAR, PIE, TABLE) including a fallback-eligible override. Card-level (`spend_per_card`,
 `active_card_rate`) and rate metrics are covered. New KPIs from the wider list are then

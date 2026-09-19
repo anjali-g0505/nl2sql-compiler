@@ -212,28 +212,75 @@ dimensions:
     group_by: "t.location"
     label: "Location (city)"
 
+  txn:                                  # one row per transaction (grain = PK)
+    select: "t.txn_id"
+    group_by: "t.txn_id"
+    aliases: [txn_id, transaction]
+    label: "Transaction"
+    note: "for listing individual transactions; forced_limit caps the rows"
+
 # ---------------------------------------------------------------------
-# MODIFIERS  (the 5 knobs; details enforced in grammar.md)
+# ATTRIBUTES
+# Row-level numeric fields. Filterable in WHERE with comparison operators
+# (amount > 100000000); never grouped by, never aggregated, never in HAVING.
+# Not a dimension (grouping by exact amount is meaningless) and not a
+# metric (not aggregated).
+#   column : the fact column compared against
+#   money  : thresholds are in the query's IN unit; codegen multiplies them
+#            back to rupees, since the column is always stored in rupees
+# ---------------------------------------------------------------------
+attributes:
+
+  amount:
+    column: "t.amt"
+    type: number
+    money: true
+    aliases: [amt, txn_amount]
+    label: "Transaction amount (₹)"
+
+# ---------------------------------------------------------------------
+# MODIFIERS  (the 6 knobs; details enforced in grammar.md)
 # ---------------------------------------------------------------------
 modifiers:
 
-  filter:                               # WHERE dim = 'value' [AND ...]
-    operator: "="
+  filter:                               # WHERE <row-level condition> [AND ...]
+    # WHERE filters rows BEFORE aggregation: dimensions and attributes only.
     combiner: "AND"
+    dimension_operators: ["=", "!=", "IN", "NOT IN"]   # dim = 'x' | dim IN ('x', 'y') to be used only with dimensions like isssuer in ('HDFC', 'ICICI')
+    attribute_operators: ["=", "!=", ">", ">=", "<", "<="]   # attr <op> number to be used only with attributes like amount > 1000000
+    # Not-equal is written '!=' in the DSL ('<>' is rejected); codegen emits
+    # the standard SQL '<>'. No NULL caveat: every column is NOT NULL.
+    threshold_unit: display             # money attributes follow IN CRORE|LAKH
+    # Dates are filtered only via PERIOD, never in WHERE.
 
-  period:                               # PERIOD <spec>; anchored to reference_date
+  period:                               # PERIOD <spec>
     # codegen PRE-COMPUTES boundary dates as string literals in Python
     # (because `date` is a string column) and emits plain string comparisons
     # like:  t.date >= '2025-12-01' AND t.date <= '<reference_date>'
-    specs: [FTD, WTD, MTD, QTD, YTD, "LAST <n> DAYS"]
+    # Every window includes both ends.
+    specs: [FTD, WTD, MTD, QTD, YTD, "LAST <n> DAYS", "FROM '<date>' TO '<date>'"]
     meaning:
       FTD: "for the day = reference_date only"
       WTD: "week-to-date: Monday of ref week .. reference_date"
       MTD: "month-to-date: 1st of ref month .. reference_date"
       QTD: "quarter-to-date: 1st of ref quarter .. reference_date"
       YTD: "year-to-date: 1st of ref year .. reference_date"
-      # exactly n days, both ends inclusive: LAST 1 DAYS == FTD
+      # exactly n days, both ends inclusive: LAST 1 DAYS == FTD.
+      # Emits period_anchor + last_n_days_window.
       "LAST <n> DAYS": "rolling window: (reference_date - (n-1) days) .. reference_date"
+      # absolute range, NOT anchored to reference_date. Dates must be real
+      # 'YYYY-MM-DD' dates with start <= end. Emits date_range_inclusive only.
+      "FROM '<date>' TO '<date>'": "explicit range: start .. end"
+
+  having:                               # HAVING metric <op> n [AND ...]
+    # HAVING filters groups AFTER aggregation: metrics only. Row-level
+    # fields (dimensions, attributes) go in WHERE — never the reverse.
+    operators: ["=", "!=", ">", ">=", "<", "<="]
+    combiner: "AND"
+    applies_to: metrics
+    requires_dimension: true            # needs BY: no groups, nothing to filter
+    metric_must_be_selected: true       # emitted by alias: HAVING value > 30000
+    threshold_unit: display             # IN CRORE|LAKH scales the threshold too
 
   top_n:                                # ORDER BY <metric|dim> DESC LIMIT n
     default_direction: DESC
@@ -241,7 +288,7 @@ modifiers:
   unit:                                 # IN CRORE | IN LAKH — divides the metric value
     crore: 10000000
     lakh: 100000
-    applies_to: "metrics with unit_scalable: true"
+    applies_to: "metrics with unit_scalable: true, and money thresholds (WHERE attributes, HAVING)"
 
   chart:                                # AS TABLE|KPI|BAR|LINE|PIE (optional override)
     types: [TABLE, KPI, BAR, LINE, PIE]
@@ -280,8 +327,17 @@ semantics:
     emits_assumption: [unit_crore, unit_lakh]  # the one matching the IN clause
 
   period_anchor:
-    rule: "All periods computed against reference_date (= MAX date in data)."
+    rule: "Relative periods (FTD..YTD, LAST n DAYS) are computed against reference_date (= MAX date in data). FROM .. TO ranges are absolute and do not emit this."
     emits_assumption: period_anchor
+
+  period_window:
+    rule: >
+      State how many days a window covers, since "last n days" and
+      "from X to Y" are easy to read as off by one. LAST n DAYS is the
+      reference date ("today") plus the n-1 days before it, so exactly n
+      days (emitted alongside period_anchor). FROM .. TO includes both the
+      start and the end date.
+    emits_assumption: [last_n_days_window, date_range_inclusive]  # by period kind
 
 # ---------------------------------------------------------------------
 # CHART INFERENCE
@@ -313,6 +369,8 @@ assumptions:
   unit_crore:       "Value shown in ₹ crore."
   unit_lakh:        "Value shown in ₹ lakh."
   period_anchor:    "Period computed relative to the latest transaction date ({ref}), as the dataset is historical."
+  last_n_days_window: "Last {n} days = {ref} (treated as today) plus the {n_minus_1} days before it: {start} to {ref}."
+  date_range_inclusive: "Date range includes both ends: {start} to {end}, inclusive."
   chart_fallback:   "Requested {requested} chart isn't suitable for this result; showing {actual} instead."
   forced_limit:     "No limit given; results capped at {limit} rows."
   active_card_denom: "Active-card rate uses total cards in card_master as the denominator."
@@ -328,6 +386,6 @@ guardrails:
     - customer_master.phone_number
     - customer_master.address
   scope: >
-    Every query must resolve to known metric(s) + dimension(s) in this
-    config. Anything that can't be grounded is rejected (out of scope)
+    Every query must resolve to known metric(s), dimension(s) and
+    attribute(s) in this config. Anything that can't be grounded is rejected (out of scope)
     rather than guessed.
