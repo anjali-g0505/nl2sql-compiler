@@ -8,9 +8,12 @@ app/
   main.py        FastAPI app: /health, /test-query
   db.py          MySQL connection pool + execute_query() (raw SQL, no ORM)
   config.py      Settings read from environment / .env
-  lexer.py       DSL string -> token list (no parser/AST yet)
+compiler/
+  lexer.py       DSL string -> token list (no parser yet)
+  ast.py         Frozen pipeline types: QueryAST -> ValidatedQuery -> CompiledQuery
 tests/
   test_lexer.py  pytest suite for the lexer
+  test_ast.py    pytest suite for the AST types
 config.yaml      Semantic layer (metrics, dimensions, joins) — source of truth
 grammar.md       Frozen DSL spec + NL -> DSL -> SQL oracle
 generate_data.py Deterministic synthetic data -> output/*.csv, output/*.sql
@@ -102,11 +105,12 @@ From the repo root:
 ```
 
 Use `python -m pytest` rather than bare `pytest`: running it as a module from the repo
-root puts the root on `sys.path`, which is what lets the tests `import app.lexer`.
+root puts the root on `sys.path`, which is what lets the tests `import compiler.lexer`.
 Bare `pytest` can fail with `ModuleNotFoundError: No module named 'app'`.
 
 ### What's covered
 
 | File | Covers |
 |---|---|
-| `tests/test_lexer.py` | Token sequences for the `grammar.md` oracle strings (E1, E2, E4–E8, E10, E14), case handling, positions, whitespace, string literals, and `LexError` cases (unterminated strings, numbers glued to words, unexpected characters) |
+| `tests/test_lexer.py` | Token sequences for the `grammar.md` oracle strings (E1, E2, E4–E8, E10, E14–E19), comparison operators incl. `!=`, `IN`/`NOT IN` lists, integers vs exact decimals, `FROM`/`TO` date ranges, case handling, positions, whitespace, string literals, and `LexError` cases (unterminated strings, malformed numbers, unquoted dates, `<>`, unexpected characters) |
+| `tests/test_ast.py` | Hand-built `QueryAST` shapes for representative DSL queries (including `HAVING` thresholds, numeric `WHERE` filters, `IN` lists, `!=` and date ranges), frozen-ness of every type, `Period` (incl. `RANGE`), `Condition` and `MetricCondition` validation, and `ValidatedQuery`/`CompiledQuery` composition |

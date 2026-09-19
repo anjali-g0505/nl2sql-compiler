@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local planning notes / prompts for later work (not part of the project)
+docs/followups-prompt.md

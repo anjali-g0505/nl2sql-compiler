@@ -1,7 +1,9 @@
-"""Lexer tests. The DSL strings come from the grammar.md oracle (E1-E14)."""
+"""Lexer tests. The DSL strings come from the grammar.md oracle (E1-E16)."""
+from decimal import Decimal
+
 import pytest
 
-from app.lexer import LexError, Token, TokenType, tokenize
+from compiler.lexer import LexError, Token, TokenType, tokenize
 
 T = TokenType
 
@@ -87,6 +89,133 @@ def test_e14_multi_metric():
     ]
 
 
+def test_e15_having_threshold():
+    dsl = "SHOW value BY customer HAVING value > 30000 ORDER BY value DESC"
+    assert types(dsl) == [
+        T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER,
+        T.HAVING, T.IDENTIFIER, T.GT, T.INTEGER,
+        T.ORDER, T.BY, T.IDENTIFIER, T.DESC, T.EOF,
+    ]
+    assert tokenize(dsl)[7].value == 30000
+
+
+def test_e16_having_with_period_and_unit():
+    dsl = "SHOW value BY merchant PERIOD MTD HAVING value > 3 IN CRORE"
+    assert types(dsl) == [
+        T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER, T.PERIOD, T.PERIOD_SPEC,
+        T.HAVING, T.IDENTIFIER, T.GT, T.INTEGER, T.IN, T.UNIT, T.EOF,
+    ]
+
+
+def test_e17_explicit_date_range():
+    dsl = "SHOW value PERIOD FROM '2025-05-12' TO '2025-06-14'"
+    assert types(dsl) == [
+        T.SHOW, T.IDENTIFIER, T.PERIOD, T.FROM, T.STRING, T.TO, T.STRING, T.EOF,
+    ]
+    # dates stay plain strings here; the parser converts and checks them
+    assert values(dsl)[4] == "2025-05-12"
+    assert values(dsl)[6] == "2025-06-14"
+
+
+def test_e18_numeric_where():
+    dsl = "SHOW value BY txn WHERE amount > 100000000 AS TABLE"
+    assert types(dsl) == [
+        T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER,
+        T.WHERE, T.IDENTIFIER, T.GT, T.INTEGER,
+        T.AS, T.CHART_TYPE, T.EOF,
+    ]
+    assert values(dsl)[7] == 100000000
+
+
+def test_from_to_are_case_insensitive_keywords():
+    assert types("from To") == [T.FROM, T.TO, T.EOF]
+
+
+def test_unquoted_date_raises():
+    # without quotes, '-' is not a DSL character
+    with pytest.raises(LexError) as exc:
+        tokenize("PERIOD FROM 2025-05-12 TO 2025-06-14")
+    assert exc.value.text == "-"
+
+
+# --- HAVING operators and numbers ----------------------------------------------
+
+@pytest.mark.parametrize("op, expected", [
+    (">", T.GT), (">=", T.GTE), ("<", T.LT), ("<=", T.LTE), ("=", T.EQUALS), ("!=", T.NEQ),
+])
+def test_comparison_operators(op, expected):
+    token = tokenize(f"HAVING value {op} 5")[2]
+    assert token.type is expected
+    assert token.value == op
+
+
+def test_two_char_operator_is_one_token_but_spaced_is_two():
+    assert types("value>=5") == [T.IDENTIFIER, T.GTE, T.INTEGER, T.EOF]
+    assert types("value > = 5") == [T.IDENTIFIER, T.GT, T.EQUALS, T.INTEGER, T.EOF]
+
+
+def test_e19_in_list_and_not_equal():
+    dsl = "SHOW volume BY issuer WHERE card_type IN ('Credit', 'Debit') AND status != 'Success'"
+    assert types(dsl) == [
+        T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER,
+        T.WHERE, T.IDENTIFIER, T.IN, T.LPAREN, T.STRING, T.COMMA, T.STRING, T.RPAREN,
+        T.AND, T.IDENTIFIER, T.NEQ, T.STRING, T.EOF,
+    ]
+    assert values(dsl)[8] == "Credit"
+    assert values(dsl)[10] == "Debit"
+
+
+def test_not_in_list():
+    assert types("card_type NOT IN ('Prepaid')") == [
+        T.IDENTIFIER, T.NOT, T.IN, T.LPAREN, T.STRING, T.RPAREN, T.EOF,
+    ]
+
+
+def test_list_in_and_unit_in_are_the_same_token():
+    # the parser tells them apart by position and by the next token
+    tokens = tokenize("WHERE card_type IN ('Credit') IN CRORE")
+    assert [t.type for t in tokens if t.value == "IN"] == [T.IN, T.IN]
+    assert tokens[3].type is T.LPAREN
+    assert tokens[7].type is T.UNIT
+
+
+def test_parens_need_no_surrounding_space():
+    assert types("IN('a','b')") == [
+        T.IN, T.LPAREN, T.STRING, T.COMMA, T.STRING, T.RPAREN, T.EOF,
+    ]
+
+
+def test_not_equal_spelled_sql_style_raises_with_hint():
+    with pytest.raises(LexError) as exc:
+        tokenize("WHERE status <> 'Success'")
+    assert exc.value.text == "<>"
+    assert exc.value.position == 13
+    assert "!=" in str(exc.value)
+
+
+def test_lone_bang_raises():
+    with pytest.raises(LexError) as exc:
+        tokenize("WHERE status ! 'Success'")
+    assert exc.value.text == "!"
+    assert exc.value.position == 13
+
+
+def test_having_keyword_is_case_insensitive():
+    assert tokenize("having")[0] == Token(T.HAVING, "HAVING", 0)
+
+
+def test_decimal_is_exact():
+    token = tokenize("HAVING success_rate < 0.9")[3]
+    assert token == Token(T.DECIMAL, Decimal("0.9"), 22)
+    assert str(token.value) == "0.9"  # prints back exactly, unlike a float
+
+
+def test_integer_stays_integer():
+    token = tokenize("LIMIT 25")[1]
+    assert token.type is T.INTEGER
+    assert token.value == 25 and isinstance(token.value, int)
+
+
 # --- Lexing rules ------------------------------------------------------------
 
 def test_keywords_are_case_insensitive_and_canonicalized():
@@ -170,7 +299,21 @@ def test_number_glued_to_word_raises():
     assert exc.value.position == 24
 
 
-@pytest.mark.parametrize("bad", ["@", "#", "$", "%", ";", "(", ")", '"', "-"])
+@pytest.mark.parametrize("bad", ["5.", "1.2.3", "0.9x", "3.x"])
+def test_malformed_decimal_raises(bad):
+    with pytest.raises(LexError) as exc:
+        tokenize(f"HAVING value > {bad}")
+    assert exc.value.text == bad
+    assert exc.value.position == 15
+
+
+def test_decimal_must_start_with_a_digit():
+    with pytest.raises(LexError) as exc:
+        tokenize("HAVING value > .5")
+    assert exc.value.text == "."
+
+
+@pytest.mark.parametrize("bad", ["@", "#", "$", "%", ";", "[", "]", '"', "-", "!"])
 def test_unclassifiable_characters_raise(bad):
     with pytest.raises(LexError):
         tokenize(f"SHOW value {bad}")
