@@ -58,7 +58,7 @@ def test_e6_two_dimensions():
 def test_e7_chart_override():
     dsl = "SHOW value BY issuer AS PIE"
     assert types(dsl) == [
-        T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER, T.AS, T.CHART_TYPE, T.EOF,
+        T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER, T.AS, T.IDENTIFIER, T.EOF,
     ]
     assert tokenize(dsl)[5].value == "PIE"
 
@@ -67,7 +67,7 @@ def test_e8_period_and_unit():
     dsl = "SHOW value BY card_type PERIOD MTD IN CRORE"
     assert types(dsl) == [
         T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER,
-        T.PERIOD, T.PERIOD_SPEC, T.IN, T.UNIT, T.EOF,
+        T.PERIOD, T.IDENTIFIER, T.IN, T.IDENTIFIER, T.EOF,
     ]
     assert values(dsl)[5] == "MTD"
     assert values(dsl)[7] == "CRORE"
@@ -102,8 +102,8 @@ def test_e15_having_threshold():
 def test_e16_having_with_period_and_unit():
     dsl = "SHOW value BY merchant PERIOD MTD HAVING value > 3 IN CRORE"
     assert types(dsl) == [
-        T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER, T.PERIOD, T.PERIOD_SPEC,
-        T.HAVING, T.IDENTIFIER, T.GT, T.INTEGER, T.IN, T.UNIT, T.EOF,
+        T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER, T.PERIOD, T.IDENTIFIER,
+        T.HAVING, T.IDENTIFIER, T.GT, T.INTEGER, T.IN, T.IDENTIFIER, T.EOF,
     ]
 
 
@@ -122,7 +122,7 @@ def test_e18_numeric_where():
     assert types(dsl) == [
         T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER,
         T.WHERE, T.IDENTIFIER, T.GT, T.INTEGER,
-        T.AS, T.CHART_TYPE, T.EOF,
+        T.AS, T.IDENTIFIER, T.EOF,
     ]
     assert values(dsl)[7] == 100000000
 
@@ -176,7 +176,7 @@ def test_list_in_and_unit_in_are_the_same_token():
     tokens = tokenize("WHERE card_type IN ('Credit') IN CRORE")
     assert [t.type for t in tokens if t.value == "IN"] == [T.IN, T.IN]
     assert tokens[3].type is T.LPAREN
-    assert tokens[7].type is T.UNIT
+    assert tokens[7].type is T.IDENTIFIER  # CRORE, checked against config later
 
 
 def test_parens_need_no_surrounding_space():
@@ -222,10 +222,12 @@ def test_keywords_are_case_insensitive_and_canonicalized():
     tokens = tokenize("show value by issuer period mtd in crore as pie")
     assert [t.type for t in tokens] == [
         T.SHOW, T.IDENTIFIER, T.BY, T.IDENTIFIER,
-        T.PERIOD, T.PERIOD_SPEC, T.IN, T.UNIT, T.AS, T.CHART_TYPE, T.EOF,
+        T.PERIOD, T.IDENTIFIER, T.IN, T.IDENTIFIER, T.AS, T.IDENTIFIER, T.EOF,
     ]
+    # keywords are uppercased; config-defined values keep their case, like any
+    # identifier — the parser uppercases them, the validator checks them
     assert [t.value for t in tokens] == [
-        "SHOW", "value", "BY", "issuer", "PERIOD", "MTD", "IN", "CRORE", "AS", "PIE", "",
+        "SHOW", "value", "BY", "issuer", "PERIOD", "mtd", "IN", "crore", "AS", "pie", "",
     ]
 
 
@@ -268,9 +270,16 @@ def test_empty_string_literal():
     assert tokenize("WHERE x = ''")[3] == Token(T.STRING, "", 10)
 
 
-def test_keyword_words_are_not_identifiers():
-    # A future metric literally named "table" would lex as CHART_TYPE, by design.
-    assert tokenize("SHOW table")[1].type is T.CHART_TYPE
+@pytest.mark.parametrize("word", ["table", "line", "mtd", "crore"])
+def test_config_values_are_plain_identifiers(word):
+    # the lexer knows no config vocabulary, so a metric or dimension may be named
+    # 'table' or 'mtd' without colliding
+    assert tokenize(f"SHOW {word}")[1] == Token(T.IDENTIFIER, word, 5)
+
+
+def test_structural_keywords_are_still_reserved():
+    # a config key named 'period' or 'last' WOULD collide — these are DSL syntax
+    assert tokenize("SHOW period")[1].type is T.PERIOD
 
 
 # --- Errors ------------------------------------------------------------------

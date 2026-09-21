@@ -6,11 +6,15 @@ Turns a raw DSL string into a flat list of tokens for the parser to consume:
 
     SHOW value BY merchant PERIOD MTD LIMIT 25 IN CRORE
     -> [SHOW, IDENTIFIER('value'), BY, IDENTIFIER('merchant'), PERIOD,
-        PERIOD_SPEC('MTD'), LIMIT, INTEGER(25), IN, UNIT('CRORE'), EOF]
+        IDENTIFIER('MTD'), LIMIT, INTEGER(25), IN, IDENTIFIER('CRORE'), EOF]
 
 Deliberately knows nothing about config.yaml: whether 'value' is a real metric is a
 later semantic-validation concern. Every word that is not fixed DSL syntax becomes an
-IDENTIFIER, valid or not.
+IDENTIFIER, valid or not. That includes the closed value sets — period specs (MTD),
+units (CRORE) and chart types (PIE) — which live in config.yaml, so new ones are added
+there without touching this file, and a dimension may be named 'table' or 'line'.
+Only structural keywords (SHOW, BY, PERIOD, AS, LAST, DAYS, FROM, TO, ...) are fixed
+syntax here; the validator checks every value against config.
 
 Keyword matching is case-insensitive and canonicalized to uppercase;
 IDENTIFIER and STRING values keep their original case, because validation matches them against config.yaml keys
@@ -52,13 +56,8 @@ class TokenType(Enum): #This class defines the different types of tokens that ca
     TO = "TO"
     NOT = "NOT"                      # only in NOT IN (...)
 
-    # Closed value sets
-    PERIOD_SPEC = "PERIOD_SPEC"      # FTD | WTD | MTD | QTD | YTD
-    UNIT = "UNIT"                    # CRORE | LAKH
-    CHART_TYPE = "CHART_TYPE"        # TABLE | KPI | BAR | LINE | PIE
-
     # Open categories
-    IDENTIFIER = "IDENTIFIER"        # metric / dimension names, original case
+    IDENTIFIER = "IDENTIFIER"        # metric / dimension / attribute names, and the config-defined values for period_spec, unit and chart_type: MTD, CRORE, PIE, ...
     STRING = "STRING"                # 'Business Decline', quotes stripped
     INTEGER = "INTEGER"              # LIMIT n, LAST n DAYS, HAVING thresholds
     DECIMAL = "DECIMAL"              # HAVING thresholds like 0.9
@@ -98,9 +97,6 @@ KEYWORDS = { #again this is a dictionary that maps the uppercase representation 
     "TO": TokenType.TO,
     "NOT": TokenType.NOT,
 }
-PERIOD_SPECS = frozenset({"FTD", "WTD", "MTD", "QTD", "YTD"})
-UNITS = frozenset({"CRORE", "LAKH"})
-CHART_TYPES = frozenset({"TABLE", "KPI", "BAR", "LINE", "PIE"})
 
 QUOTE = "'"
 #this is a constant that represents the single quote character, which is used to delimit string literals in the DSL. The lexer uses this constant to identify and extract string values enclosed in single quotes.
@@ -203,12 +199,6 @@ def tokenize(dsl: str) -> List[Token]:
             upper = word.upper()
             if upper in KEYWORDS:
                 tokens.append(Token(KEYWORDS[upper], upper, start))
-            elif upper in PERIOD_SPECS:
-                tokens.append(Token(TokenType.PERIOD_SPEC, upper, start))
-            elif upper in UNITS:
-                tokens.append(Token(TokenType.UNIT, upper, start))
-            elif upper in CHART_TYPES:
-                tokens.append(Token(TokenType.CHART_TYPE, upper, start))
             else:
                 tokens.append(Token(TokenType.IDENTIFIER, word, start))  # original case
             continue

@@ -19,7 +19,7 @@ query      := SHOW metric_list
               [ WHERE condition_list ]
               [ PERIOD period_spec ]
               [ HAVING having_list ]
-              [ ORDER BY sort_key (ASC | DESC) ]
+              [ ORDER BY sort_key [ ASC | DESC ] ]      (default DESC)
               [ LIMIT integer ]
               [ IN unit ]
               [ AS chart_type ]
@@ -35,17 +35,26 @@ having_cond    := metric comp_op number
 comp_op        := '=' | '!=' | '>' | '>=' | '<' | '<='
 number         := integer | decimal          (decimal = digits '.' digits, e.g. 0.9)
 sort_key       := metric | dimension
-period_spec    := FTD | WTD | MTD | QTD | YTD
+period_spec    := period_name                 (FTD | WTD | MTD | QTD | YTD)
                 | LAST integer DAYS
                 | FROM date_literal TO date_literal
 date_literal   := string_literal in 'YYYY-MM-DD' form, a real calendar date
-unit           := CRORE | LAKH
-chart_type     := TABLE | KPI | BAR | LINE | PIE
 
-metric     := <any key under metrics: in config.yaml>
-dimension  := <any key/alias under dimensions: in config.yaml>
-attribute  := <any key/alias under attributes: in config.yaml>
+metric      := <any key under metrics: in config.yaml>
+dimension   := <any key/alias under dimensions: in config.yaml>
+attribute   := <any key/alias under attributes: in config.yaml>
+period_name := <any key under modifiers.period.specs: in config.yaml>
+unit        := <any key under modifiers.unit: in config.yaml>   (CRORE | LAKH)
+chart_type  := <any type under modifiers.chart.types: in config.yaml>
+                                              (TABLE | KPI | BAR | LINE | PIE)
 ```
+
+Everything in that last block is **vocabulary, not syntax**: the lexer reads all of it as
+plain identifiers, the parser only checks the shape, and the validator checks the values
+against `config.yaml`. So a new chart type or period spec is a config change alone, and a
+dimension may be named `table` or `line`. Only the structural keywords (`SHOW`, `BY`,
+`WHERE`, `AND`, `NOT`, `PERIOD`, `HAVING`, `ORDER`, `LIMIT`, `IN`, `AS`, `ASC`, `DESC`,
+`LAST`, `DAYS`, `FROM`, `TO`) are reserved and cannot be used as names.
 
 The parser tells the `condition` forms apart by what follows the name (quoted text, a
 parenthesised list, or a number), since it doesn't read config; the validator then checks
