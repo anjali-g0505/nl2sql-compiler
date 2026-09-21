@@ -10,6 +10,7 @@ from compiler.ast import (
     Condition,
     MetricCondition,
     Name,
+    Order,
     Period,
     QueryAST,
     ValidatedQuery,
@@ -32,8 +33,7 @@ def test_metrics_only_everything_else_default():
     assert q.filters == ()
     assert q.period is None
     assert q.having == ()
-    assert q.order_by is None
-    assert q.order_dir == "DESC"
+    assert q.order is None
     assert q.limit is None
     assert q.unit is None
     assert q.chart_type is None
@@ -62,7 +62,7 @@ def test_filter_leaves_order_by_unset():
     assert q.filters == (Condition(Name("card_type", "card_type"), "=", "Credit"),)
     assert q.filters[0].value == "Credit"  # no surrounding quotes
     # month's chronological default ordering is codegen's job, not recorded here
-    assert q.order_by is None
+    assert q.order is None
 
 
 def test_full_clause_set():
@@ -70,16 +70,14 @@ def test_full_clause_set():
         metrics=(n("value"),),
         dimensions=(n("merchant"),),
         period=Period("MTD"),
-        order_by=n("value"),
-        order_dir="DESC",
+        order=Order(n("value"), "DESC"),
         limit=25,
         unit="CRORE",
         raw_dsl="SHOW value BY merchant PERIOD MTD ORDER BY value DESC LIMIT 25 IN CRORE",
     )
 
     assert q.period == Period(kind="MTD", n=None)
-    assert q.order_by == Name("value", "value")
-    assert q.order_dir == "DESC"
+    assert q.order == Order(Name("value", "value"), "DESC")
     assert q.limit == 25
     assert q.unit == "CRORE"
     assert q.chart_type is None
@@ -113,8 +111,7 @@ def test_having_threshold_e15():
         metrics=(n("value"),),
         dimensions=(n("customer"),),
         having=(MetricCondition(metric=n("value"), op=">", value=Decimal("30000")),),
-        order_by=n("value"),
-        order_dir="DESC",
+        order=Order(n("value"), "DESC"),
         raw_dsl="SHOW value BY customer HAVING value > 30000 ORDER BY value DESC",
     )
 
@@ -264,6 +261,23 @@ def test_bad_list_conditions_raise(op, value):
         Condition(n("card_type"), op, value)
 
 
+# --- Order validation ---------------------------------------------------------
+
+def test_order_direction_defaults_to_desc():
+    assert Order(n("value")).direction == "DESC"
+
+
+@pytest.mark.parametrize("direction", ["ASC", "DESC"])
+def test_order_accepts_both_directions(direction):
+    assert Order(n("value"), direction).direction == direction
+
+
+@pytest.mark.parametrize("direction", ["asc", "ascending", "UP", ""])
+def test_order_rejects_unknown_direction(direction):
+    with pytest.raises(ValueError):
+        Order(n("value"), direction)
+
+
 # --- Immutability -------------------------------------------------------------
 
 def _instances():
@@ -273,6 +287,7 @@ def _instances():
         (n("value"), "canonical"),
         (Condition(n("card_type"), "=", "Credit"), "value"),
         (Condition(n("card_type"), "IN", ("Credit", "Debit")), "op"),
+        (Order(n("value"), "ASC"), "direction"),
         (Period("RANGE", start=date(2025, 5, 12), end=date(2025, 6, 14)), "end"),
         (MetricCondition(n("value"), ">", Decimal("1")), "value"),
         (ast, "limit"),
@@ -352,8 +367,7 @@ def test_validated_and_compiled_queries_compose():
     ast = QueryAST(
         metrics=(n("volume"),),
         dimensions=(Name(raw="category", canonical="mcc"),),
-        order_by=n("volume"),
-        order_dir="ASC",
+        order=Order(n("volume"), "ASC"),
         chart_type="PIE",
         raw_dsl=dsl,
     )

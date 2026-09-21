@@ -21,6 +21,7 @@ from decimal import Decimal
 COMPARISON_OPS = frozenset({"=", "!=", ">", ">=", "<", "<="})
 TEXT_OPS = frozenset({"=", "!="})  # a single text value
 LIST_OPS = frozenset({"IN", "NOT IN"})  # a tuple of text values
+SORT_DIRECTIONS = frozenset({"ASC", "DESC"})
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,27 @@ class MetricCondition:
 
 
 @dataclass(frozen=True)
+class Order:
+    """The ORDER BY clause: sort key plus direction, held as ONE field on QueryAST.
+
+    Keeping them together means a direction can't exist without a key: no ORDER BY is
+    `order is None`, not a key of None beside a meaningless "DESC". The direction is
+    optional in the DSL and defaults to DESC (config modifiers.top_n.default_direction),
+    since ORDER BY is nearly always used for ranking.
+
+    Default orderings for some dimensions (e.g. `month` chronologically) are applied
+    later by codegen; only an explicit ORDER BY is recorded here.
+    """
+
+    key: Name  # a metric or dimension; which one is the validator's call
+    direction: str = "DESC"  # "ASC" | "DESC"
+
+    def __post_init__(self) -> None:
+        if self.direction not in SORT_DIRECTIONS:
+            raise ValueError(f"Unknown sort direction {self.direction!r}")
+
+
+@dataclass(frozen=True)
 class QueryAST: #this class is just to check the structure of the query and to make sure that the query is valid. It does not perform any validation or code generation.
     #so that when the object is created, it can be used to check the structure of the query and to make sure that the query is valid
     #used when the query is parsed and the AST is created.
@@ -138,9 +160,7 @@ class QueryAST: #this class is just to check the structure of the query and to m
     - `limit` stays None when the user gave no LIMIT. Codegen applies the
       forced-limit guardrail and emits the `forced_limit` assumption; the AST must
       preserve "user gave nothing" so that can happen.
-    - `order_by` reflects ONLY an explicit ORDER BY clause. Default orderings for
-      some dimensions (e.g. `month` sorted chronologically) are applied later by
-      codegen and are not recorded here.
+    - `order` is None unless the query had an explicit ORDER BY clause.
     - `chart_type` comes from the AS clause and is never used to build SQL.
     - `filters` (WHERE) hold row-level conditions (dimensions, numeric attributes);
       `having` holds aggregated-metric conditions. Every money threshold, in WHERE
@@ -155,8 +175,7 @@ class QueryAST: #this class is just to check the structure of the query and to m
     filters: tuple[Condition, ...] = ()
     period: Period | None = None
     having: tuple[MetricCondition, ...] = ()
-    order_by: Name | None = None  # explicit ORDER BY only
-    order_dir: str = "DESC"  # "ASC" | "DESC"
+    order: Order | None = None  # explicit ORDER BY only
     limit: int | None = None  # None means the user gave no LIMIT
     unit: str | None = None  # "CRORE" | "LAKH"
     chart_type: str | None = None  # from AS clause; never used to build SQL

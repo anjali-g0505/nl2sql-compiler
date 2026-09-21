@@ -9,11 +9,13 @@ app/
   db.py          MySQL connection pool + execute_query() (raw SQL, no ORM)
   config.py      Settings read from environment / .env
 compiler/
-  lexer.py       DSL string -> token list (no parser yet)
+  lexer.py       DSL string -> token list
+  parser.py      Token list -> QueryAST (recursive descent, syntax only)
   ast.py         Frozen pipeline types: QueryAST -> ValidatedQuery -> CompiledQuery
 tests/
   test_lexer.py  pytest suite for the lexer
   test_ast.py    pytest suite for the AST types
+  test_parser.py pytest suite for the parser
 config.yaml      Semantic layer (metrics, dimensions, joins) — source of truth
 grammar.md       Frozen DSL spec + NL -> DSL -> SQL oracle
 generate_data.py Deterministic synthetic data -> output/*.csv, output/*.sql
@@ -114,3 +116,4 @@ Bare `pytest` can fail with `ModuleNotFoundError: No module named 'app'`.
 |---|---|
 | `tests/test_lexer.py` | Token sequences for the `grammar.md` oracle strings (E1, E2, E4–E8, E10, E14–E19), comparison operators incl. `!=`, `IN`/`NOT IN` lists, integers vs exact decimals, `FROM`/`TO` date ranges, case handling, positions, whitespace, string literals, and `LexError` cases (unterminated strings, malformed numbers, unquoted dates, `<>`, unexpected characters) |
 | `tests/test_ast.py` | Hand-built `QueryAST` shapes for representative DSL queries (including `HAVING` thresholds, numeric `WHERE` filters, `IN` lists, `!=` and date ranges), frozen-ness of every type, `Period` (incl. `RANGE`), `Condition` and `MetricCondition` validation, and `ValidatedQuery`/`CompiledQuery` composition |
+| `tests/test_parser.py` | `QueryAST` for the `grammar.md` oracle strings and an all-clauses query, optional `ORDER BY` direction, case handling, unresolved names, and `ParseError` cases (clause order and duplicates, malformed conditions and `IN` lists, bad dates, non-positive `LIMIT`/`LAST`, error positions) |
