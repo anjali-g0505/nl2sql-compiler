@@ -26,11 +26,12 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
+from app.charts import choose_chart
 from compiler.ast import Assumption, ValidatedQuery
-from compiler.codegen import CodegenError, generate
+from compiler.codegen import PLAIN_COLUMN, CodegenError, generate
 from compiler.parser import LexError, ParseError, parse
 from compiler.resolver import Resolution, ResolvedQuery, Status, resolve
-from compiler.semantic_layer import SemanticLayer
+from compiler.semantic_layer import SemanticLayer, split_columns
 from compiler.validator import ValidationError, validate
 
 CLARIFICATION_TTL = timedelta(minutes=30)
@@ -41,6 +42,10 @@ Execute = Callable[[str, Sequence[Any]], List[Dict[str, Any]]]
 
 class TranslatorError(Exception):
     """The NL -> DSL step failed (network, quota, empty answer). Not the user's fault."""
+
+
+class Unanswerable(Exception):
+    """The translator judged the question out of scope for this data (e.g. weather)."""
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,8 @@ class Pipeline:
         for attempt in (1, 2):  # the first try, plus exactly one retry
             try:
                 dsl = self.translator.translate(question, feedback)
+            except Unanswerable as exc:
+                return _error(422, "scope", [str(exc)], attempts=attempt, question=question)
             except TranslatorError as exc:
                 return _error(502, "translate", [str(exc)], attempts=attempt)
             try:
@@ -226,6 +233,9 @@ class Pipeline:
             return _error(503, "compile", [str(exc)], dsl=dsl, attempts=attempts)
 
         sql, assumptions = compiled.executable_sql, list(compiled.assumptions)
+        if not sql.lstrip().upper().startswith("SELECT"):  # read-only, whatever codegen did
+            return _error(500, "compile", ["refusing to run a statement that is not a SELECT"],
+                          dsl=dsl, attempts=attempts)
         capped = resolved.query.ast.limit is None and bool(self.forced_limit)
         if capped:  # the guardrail: fetch one extra row to know whether anything was cut
             sql = sql.rstrip(";") + f"\nLIMIT {self.forced_limit + 1};"
@@ -234,19 +244,60 @@ class Pipeline:
             rows = rows[: self.forced_limit]
             assumptions.append(Assumption("forced_limit", (("limit", str(self.forced_limit)),)))
 
+        ast = resolved.query.ast
+        metrics = [m.canonical for m in ast.metrics]
+        dimensions = [d.canonical for d in ast.dimensions]
+        chart_type, fallback = choose_chart(self.layer, dimensions, metrics, rows, ast.chart_type)
+        if fallback:
+            assumptions.append(fallback)
+
+        columns = list(rows[0]) if rows else []
         templates = self.layer.assumptions
         return Outcome(200, {
             "status": "ok",
             "question": question,
             "dsl": dsl,
             "sql": compiled.sql,
-            "chart_type": compiled.chart_type,
-            "assumptions": [{"key": a.key, "text": a.render(templates[a.key])} for a in assumptions],
-            "columns": list(rows[0]) if rows else [],
+            "chart_type": chart_type,
+            # params too: the UI renders a corrected value as "ICIC -> ICICI Bank"
+            "assumptions": [
+                {"key": a.key, "text": a.render(templates[a.key]), "params": dict(a.params)}
+                for a in assumptions
+            ],
+            # which columns are categories and which are numbers, for drawing the chart
+            "metric_columns": [m for m in metrics if m in columns] if rows else metrics,
+            "dimension_columns": [c for c in columns if c not in metrics],
+            "labels": {
+                **self._dimension_labels(dimensions),
+                **{m: self.layer.metric(m).get("label", m) for m in metrics},
+            },
+            "unit": ast.unit,
+            "columns": columns,
             "rows": rows,
             "row_count": len(rows),
             "attempts": attempts,
         })
+
+    def _dimension_labels(self, dimensions: Sequence[str]) -> Dict[str, str]:
+        """Result column -> header, from config labels: iss_name -> "Issuer".
+
+        A column is named by its alias (codegen aliases expressions, e.g. month) or by
+        the part after the dot (i.iss_name -> iss_name). A dimension with several
+        columns gets the label plus the column's last word: "Merchant category (MCC) code".
+        """
+        labels: Dict[str, str] = {}
+        for key in dimensions:
+            entry = self.layer.dimension(key)
+            label = entry.get("label", key)
+            columns = split_columns(entry.get("select", ""))
+            if len(columns) == 1 and not PLAIN_COLUMN.match(columns[0]):
+                labels[key] = label
+                continue
+            for column in columns:
+                name = column.split(".")[-1]
+                suffix = f" {name.split('_')[-1]}" if len(columns) > 1 else ""
+                labels[name] = label + suffix
+        return labels
 
     def _clarify(
         self,
@@ -333,5 +384,5 @@ def _substitute(validated: ValidatedQuery, field_key: str, old: str, new: str) -
 
 
 def _error(http_status: int, stage: str, errors: Sequence[str], **extra: Any) -> Outcome:
-    """stage: request | translate | parse | validate | resolve | clarification | compile."""
+    """stage: request | translate | scope | parse | validate | resolve | clarification | compile."""
     return Outcome(http_status, {"status": "error", "stage": stage, "errors": list(errors), **extra})

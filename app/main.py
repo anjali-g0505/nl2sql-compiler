@@ -1,4 +1,4 @@
-"""FastAPI entrypoint.
+"""FastAPI entrypoint for IntentQL — from business questions to financial insights.
 
 POST /query takes a question (or DSL) and returns rows, a clarification to answer, or an
 error; POST /clarifications/{id} answers a clarification. The rules for which is which
@@ -7,15 +7,19 @@ live in app/pipeline.py; this module only wires HTTP to it.
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from app.config import settings
 from app.db import DatabaseError, execute_query
 from app.pipeline import Outcome, Pipeline
+from app.translator import GroqTranslator
 from compiler.indexes import IndexRegistry, refresh_nightly
 
 logger = logging.getLogger(__name__)
@@ -25,8 +29,21 @@ logger = logging.getLogger(__name__)
 # unresolvable dimensions simply pass their values through until the next refresh.
 index_registry = IndexRegistry()
 
-# translator=None until the LLM stage: questions get a 503, DSL works end to end.
-pipeline = Pipeline(registry=index_registry, execute=execute_query, translator=None)
+# NL -> DSL on Groq. Without GROQ_API_KEY questions get a 503; DSL still works end to end.
+translator = (
+    GroqTranslator(
+        api_key=settings.groq_api_key,
+        model=settings.groq_model,
+        fallback_model=settings.groq_fallback_model or None,
+        reference_date=lambda: index_registry.reference_date,
+    )
+    if settings.groq_api_key
+    else None
+)
+pipeline = Pipeline(registry=index_registry, execute=execute_query, translator=translator)
+
+# The React app (frontend/), once built with `npm run build`, is served from /.
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
 @asynccontextmanager
@@ -43,7 +60,7 @@ async def lifespan(app: FastAPI):
         nightly.cancel()
 
 
-app = FastAPI(title="nl2sql-compiler", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="IntentQL", version="0.1.0", lifespan=lifespan)
 
 
 @app.post("/admin/refresh-indexes")
@@ -113,3 +130,8 @@ WHERE r.TD_BD = 'Success';"""
 def test_query():
     rows = execute_query(TEST_SQL)
     return {"sql": TEST_SQL, "rows": rows}
+
+
+# Registered last so the API routes above take precedence over the static files.
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

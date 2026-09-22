@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-from app.pipeline import Feedback, Pipeline, TranslatorError
+from app.pipeline import Feedback, Pipeline, TranslatorError, Unanswerable
 from compiler.indexes import SourceStatus
 from compiler.resolver import build_index
 
@@ -106,7 +106,7 @@ def test_dsl_runs_end_to_end(execute):
     sql, params = execute.calls[0]
     assert "b.card_type = %s" in sql and params == ("Credit",)     # what actually ran
     assert body["assumptions"] == [
-        {"key": "success_default", "text": "Only successful transactions considered."}
+        {"key": "success_default", "text": "Only successful transactions considered.", "params": {}}
     ]
     assert body["rows"] == [{"value": 1}] and body["columns"] == ["value"]
     assert body["attempts"] == 1
@@ -121,7 +121,8 @@ def test_forced_limit_is_applied_at_execution_not_in_the_sql():
     assert "LIMIT" not in outcome.body["sql"]          # the shown SQL is what was asked
     assert outcome.body["row_count"] == 2
     assert outcome.body["assumptions"][-1] == {
-        "key": "forced_limit", "text": "No limit given; results capped at 2 rows."
+        "key": "forced_limit", "text": "No limit given; results capped at 2 rows.",
+        "params": {"limit": "2"},
     }
 
 
@@ -291,3 +292,82 @@ def test_one_value_used_twice_is_asked_once():
     pipeline = make()
     body = pipeline.ask(dsl="SHOW volume WHERE status IN ('decline', 'decline')").body
     assert [q["id"] for q in body["questions"]] == ["q1"]
+
+
+# --- scope, charts and the read-only check ------------------------------------
+
+def test_an_out_of_scope_question_is_reported_not_retried():
+    translator = ScriptedTranslator(Unanswerable("weather is not in this data"))
+    outcome = make(translator).ask(question="weather in Mumbai?")
+    assert outcome.http_status == 422
+    assert outcome.body["stage"] == "scope"
+    assert outcome.body["errors"] == ["weather is not in this data"]
+    assert len(translator.calls) == 1
+
+
+def test_the_response_says_how_to_draw_it():
+    execute = FakeExecute(rows=[{"iss_name": "HDFC Bank", "value": 5}, {"iss_name": "SBI", "value": 3}])
+    body = make(execute=execute).ask(dsl="SHOW value BY issuer IN CRORE").body
+    assert body["chart_type"] == "BAR"
+    assert body["dimension_columns"] == ["iss_name"]
+    assert body["metric_columns"] == ["value"]
+    assert body["labels"] == {"iss_name": "Issuer", "value": "Value (₹)"}
+    assert body["unit"] == "CRORE"
+
+
+def test_an_unsuitable_chart_request_falls_back_visibly():
+    execute = FakeExecute(rows=[{"iss_name": f"i{n}", "value": n} for n in range(12)])
+    body = make(execute=execute).ask(dsl="SHOW value BY issuer AS PIE").body
+    assert body["chart_type"] == "BAR"
+    assert body["assumptions"][-1]["key"] == "chart_fallback"
+
+
+def test_only_select_statements_are_ever_run(monkeypatch, execute):
+    import app.pipeline as pipeline_module
+    from compiler.ast import CompiledQuery
+
+    def rogue_generate(*args, **kwargs):
+        return CompiledQuery(sql="DELETE FROM card_txns;", dsl="", chart_type=None,
+                             assumptions=(), executable_sql="DELETE FROM card_txns;")
+
+    monkeypatch.setattr(pipeline_module, "generate", rogue_generate)
+    outcome = make(execute=execute).ask(dsl="SHOW value")
+    assert outcome.http_status == 500
+    assert execute.calls == []
+
+
+def test_a_percentage_written_as_a_rate_is_fixed_on_the_retry(execute):
+    translator = ScriptedTranslator(
+        "SHOW business_decline_rate BY merchant HAVING business_decline_rate < 10",
+        "SHOW business_decline_rate BY merchant HAVING business_decline_rate < 0.1",
+    )
+    outcome = make(translator, execute).ask(question="merchants under 10% business declines")
+
+    _, feedback = translator.calls[1]
+    assert "did you mean 0.1?" in feedback.errors[0]
+    assert outcome.body["status"] == "ok" and outcome.body["attempts"] == 2
+    assert "HAVING business_decline_rate < 0.1" in execute.calls[0][0]
+
+
+@pytest.mark.parametrize("dsl, columns, expected", [
+    ("SHOW volume BY issuer, merchant, acquirer", ["iss_name", "name", "acq_name"],
+     {"iss_name": "Issuer", "name": "Merchant", "acq_name": "Acquirer"}),
+    ("SHOW volume BY month", ["month"], {"month": "Month (YYYY-MM)"}),
+    ("SHOW volume BY mcc", ["mcc_code", "mcc_description"],
+     {"mcc_code": "Merchant category (MCC) code",
+      "mcc_description": "Merchant category (MCC) description"}),
+])
+def test_dimension_columns_get_their_config_labels(dsl, columns, expected):
+    execute = FakeExecute(rows=[{**{c: "x" for c in columns}, "volume": 1}] * 2)
+    labels = make(execute=execute).ask(dsl=dsl).body["labels"]
+    assert {c: labels[c] for c in columns} == expected
+    assert labels["volume"] == "Volume (transaction count)"
+
+
+def test_corrected_values_carry_their_parts_for_the_ui():
+    execute = FakeExecute()
+    body = make(execute=execute).ask(dsl="SHOW value WHERE issuer = 'HDFC'").body
+    corrected = [a for a in body["assumptions"] if a["key"] == "value_corrected"]
+    assert corrected and corrected[0]["params"] == {
+        "raw": "HDFC", "resolved": "HDFC Bank", "field": "issuer",
+    }
