@@ -22,6 +22,7 @@ COMPARISON_OPS = frozenset({"=", "!=", ">", ">=", "<", "<="})
 TEXT_OPS = frozenset({"=", "!="})  # a single text value
 LIST_OPS = frozenset({"IN", "NOT IN"})  # a tuple of text values
 SORT_DIRECTIONS = frozenset({"ASC", "DESC"})
+SUCCESS_FILTER_MODES = frozenset({"none", "where", "conditional"})
 
 
 @dataclass(frozen=True)
@@ -194,11 +195,21 @@ class ValidatedQuery:
     - `joins` are deduplicated table names in a stable, deterministic order, so
       identical queries produce byte-identical SQL.
     - `order_by_kind` tells codegen how to reference the sort key in SQL.
+    - `success_filter` records the implicit-success decision, which the validator
+      makes because `joins` depends on it: "where" adds WHERE r.TD_BD='Success',
+      "conditional" moves it inside the money metrics (mixed metrics, see E14), and
+      "none" means it was suppressed by an outcome dimension or never applied.
+      Codegen emits what it is told here rather than re-deriving the rule.
     """
 
     ast: QueryAST
     joins: tuple[str, ...]
     order_by_kind: str | None = None  # "metric" | "dimension" | None
+    success_filter: str = "none"  # "none" | "where" | "conditional"
+
+    def __post_init__(self) -> None:
+        if self.success_filter not in SUCCESS_FILTER_MODES:
+            raise ValueError(f"Unknown success filter mode {self.success_filter!r}")
 
 
 @dataclass(frozen=True)

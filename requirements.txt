@@ -3,3 +3,4 @@ uvicorn[standard]==0.39.0
 mysql-connector-python==9.4.0
 python-dotenv==1.2.1
 PyYAML==6.0.3
+rapidfuzz==3.13.0

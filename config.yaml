@@ -128,6 +128,15 @@ metrics:
 #   outcome_dimension  : referencing it SUPPRESSES the implicit success
 #                        filter (this is what makes success-vs-decline work)
 #   pii                : resolves to a masked id; raw PII columns are blocked
+#   filter_column      : column a WHERE compares against. Required when select
+#                        lists 2+ columns (you can group by code+description,
+#                        but a filter compares exactly one column).
+#   resolution         : how a filter's text value is matched to a real value
+#                        (see the VALUE RESOLUTION section):
+#                          enum    -> the `values:` list below
+#                          catalog -> a small DISTINCT set read from the DB
+#                          entity  -> a large id/name index with aliases
+#                          id      -> exact match only, never fuzzy
 # ---------------------------------------------------------------------
 dimensions:
 
@@ -135,24 +144,40 @@ dimensions:
     requires_join: [issuer_master]
     select: "i.iss_name"
     group_by: "i.iss_name"
+    filter_column: "i.iss_name"
+    resolution: entity
+    entity: issuer
+    filter_value: name                  # the resolved NAME is compared, not the id
     label: "Issuer"
 
   acquirer:
     requires_join: [acquirer_master]
     select: "a.acq_name"
     group_by: "a.acq_name"
+    filter_column: "a.acq_name"
+    resolution: entity
+    entity: acquirer
+    filter_value: name
     label: "Acquirer"
 
   merchant:
     requires_join: [merchant_master]
     select: "m.name"
     group_by: "m.name"
+    filter_column: "m.name"
+    resolution: entity
+    entity: merchant
+    filter_value: name
     label: "Merchant"
 
   mcc:                                  # merchant category (MCC) — unified
     requires_join: [merchant_master]
     select: "m.mcc_code, m.mcc_description"
     group_by: "m.mcc_code, m.mcc_description"
+    filter_column: "m.mcc_code"         # 'Grocery' resolves to its code
+    resolution: catalog
+    catalog: mcc
+    filter_value: id
     aliases: [merchant_category, category]
     label: "Merchant category (MCC)"
 
@@ -160,22 +185,32 @@ dimensions:
     requires_join: [BIN_master]
     select: "b.card_type"
     group_by: "b.card_type"
+    filter_column: "b.card_type"
+    resolution: enum
+    values: [Credit, Debit, Prepaid]
     label: "Card type"
 
   card_variant:                         # Classic / Business / Platinum
     requires_join: [BIN_master]
     select: "b.card_variant"
     group_by: "b.card_variant"
+    filter_column: "b.card_variant"
+    resolution: enum
+    values: [Classic, Business, Platinum]
     label: "Card variant"
 
   card:                                 # masked card id, no join needed
     select: "t.card_id"
     group_by: "t.card_id"
+    filter_column: "t.card_id"
+    resolution: id
     label: "Card"
 
   customer:                             # masked customer id — PII-safe
     select: "t.customer_id"
     group_by: "t.customer_id"
+    filter_column: "t.customer_id"
+    resolution: id
     pii: true
     label: "Customer"
     note: "resolves to masked customer_id only; name/phone/address are blocked"
@@ -184,6 +219,9 @@ dimensions:
     requires_join: [response_master]
     select: "r.TD_BD"
     group_by: "r.TD_BD"
+    filter_column: "r.TD_BD"
+    resolution: enum
+    values: ["Success", "Business Decline", "Technical Decline"]
     outcome_dimension: true
     label: "Status (Success / Business Decline / Technical Decline)"
 
@@ -191,6 +229,10 @@ dimensions:
     requires_join: [response_master]
     select: "r.response_code, r.response_description"
     group_by: "r.response_code, r.response_description"
+    filter_column: "r.response_code"    # 'Do not honour' resolves to its code
+    resolution: catalog
+    catalog: response
+    filter_value: id
     outcome_dimension: true
     aliases: [error_code, error]
     label: "Response / error code"
@@ -198,6 +240,8 @@ dimensions:
   month:
     select: "SUBSTRING(t.date,1,7)"
     group_by: "SUBSTRING(t.date,1,7)"
+    filter_column: "SUBSTRING(t.date,1,7)"
+    resolution: id                      # 'YYYY-MM'; date filtering belongs to PERIOD
     time_dimension: true
     default_order: asc
     label: "Month (YYYY-MM)"
@@ -205,16 +249,24 @@ dimensions:
   country:
     select: "t.country"
     group_by: "t.country"
+    filter_column: "t.country"
+    resolution: catalog
+    catalog: country
     label: "Country"
 
   location:
     select: "t.location"
     group_by: "t.location"
+    filter_column: "t.location"
+    resolution: catalog
+    catalog: location
     label: "Location (city)"
 
   txn:                                  # one row per transaction (grain = PK)
     select: "t.txn_id"
     group_by: "t.txn_id"
+    filter_column: "t.txn_id"
+    resolution: id
     aliases: [txn_id, transaction]
     label: "Transaction"
     note: "for listing individual transactions; forced_limit caps the rows"
@@ -237,6 +289,46 @@ attributes:
     money: true
     aliases: [amt, txn_amount]
     label: "Transaction amount (₹)"
+
+# ---------------------------------------------------------------------
+# VALUE RESOLUTION
+# Runs after semantic validation, before SQL generation: every text value in
+# a WHERE condition is matched to a value the database actually holds, so a
+# typo becomes an error the LLM or the user can fix instead of a silent
+# zero-row result. Each resolution ends as SUCCESS, CORRECTED (surfaced as an
+# assumption), AMBIGUOUS (ask the user) or UNKNOWN (retry once for enum/catalog,
+# ask the user for entity).
+#   catalogs : small DISTINCT sets, read from the DB and cached
+#   entities : large id/name indexes with aliases, refreshed nightly
+# Note: issuer and acquirer are separate indexes, not one "bank" index — the
+# schema keeps them in separate tables with separate id spaces.
+# ---------------------------------------------------------------------
+value_resolution:
+
+  normalize: [casefold, strip, collapse_whitespace, strip_punctuation]
+
+  fuzzy:
+    # token_set_ratio scores a subset as a full match, which is how people type:
+    # 'hdfc' -> 'HDFC Bank', 'grocery' -> 'Grocery Stores'. 'decline' then matches
+    # both decline classes and is AMBIGUOUS, which is the right outcome.
+    scorer: token_set_ratio
+    threshold: 88                       # >= this score counts as a candidate
+    min_length: 4                       # shorter values are matched exactly only
+    max_candidates: 5                   # number of candidates shown to the user when AMBIGUOUS/UNKNOWN
+
+  catalogs:                             # id, name
+    mcc:      "SELECT DISTINCT mcc_code AS id, mcc_description AS name FROM merchant_master"
+    response: "SELECT response_code AS id, response_description AS name FROM response_master"
+    country:  "SELECT DISTINCT country AS id, country AS name FROM card_txns"
+    location: "SELECT DISTINCT location AS id, location AS name FROM card_txns"
+
+  entities:                             # id, name — aliases merged from aliases.yaml
+    issuer:   "SELECT id AS id, iss_name AS name FROM issuer_master"
+    acquirer: "SELECT id AS id, acq_name AS name FROM acquirer_master"
+    merchant: "SELECT merchant_id AS id, name AS name FROM merchant_master"
+
+  aliases_file: aliases.yaml
+  refresh: nightly                      # atomic swap; keep the old index if it fails
 
 # ---------------------------------------------------------------------
 # MODIFIERS  (the 6 knobs; details enforced in grammar.md)
@@ -374,13 +466,17 @@ assumptions:
   chart_fallback:   "Requested {requested} chart isn't suitable for this result; showing {actual} instead."
   forced_limit:     "No limit given; results capped at {limit} rows."
   active_card_denom: "Active-card rate uses total cards in card_master as the denominator."
+  value_corrected:  "Interpreted {raw} as {resolved} for {field}."
 
 # ---------------------------------------------------------------------
 # GUARDRAILS
 # ---------------------------------------------------------------------
 guardrails:
   read_only: true                       # SELECT only; reject any DML/DDL
-  forced_limit: 1000                    # applied when no LIMIT is present
+  forced_limit: 100000                  # applied when no LIMIT is present. The UI
+                                        # passes its own cap (10k / 50k / 1L / 10L)
+                                        # as an explicit LIMIT; this is only the
+                                        # runaway-query backstop, not a display cap.
   pii_blocked_columns:                  # never selectable, even if asked
     - customer_master.name
     - customer_master.phone_number
