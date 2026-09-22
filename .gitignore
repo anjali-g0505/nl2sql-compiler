@@ -219,3 +219,7 @@ __marimo__/
 
 # Local planning notes / prompts for later work (not part of the project)
 docs/followups-prompt.md
+
+# Frontend (frontend/): dependencies; the build output is covered by dist/ above
+node_modules/
+*.tsbuildinfo
