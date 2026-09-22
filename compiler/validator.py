@@ -33,7 +33,15 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from compiler.ast import Condition, MetricCondition, Name, Order, QueryAST, ValidatedQuery
+from compiler.ast import (
+    COUNTED_PERIODS,
+    Condition,
+    MetricCondition,
+    Name,
+    Order,
+    QueryAST,
+    ValidatedQuery,
+)
 from compiler.semantic_layer import SemanticLayer
 
 # "alias.column" inside a config SQL fragment, e.g. m.mcc_code in "m.mcc_code, m.name"
@@ -225,12 +233,31 @@ class _Validator:
                     f"HAVING metric {metric.canonical!r} must also appear in SHOW"
                 )
                 continue
+            out_of_range = self._out_of_range(metric.canonical, condition.value)
+            if out_of_range:
+                self.fail(out_of_range)
+                continue
             new = replace(condition, metric=metric)
             key = (metric.canonical, new.op, new.value)
             if key not in seen:
                 seen.add(key)
                 resolved.append(new)
         return tuple(resolved)
+
+    def _out_of_range(self, key: str, value: Decimal) -> Optional[str]:
+        """Why a HAVING threshold can't be meant as written, e.g. `rate < 10` for 10%."""
+        bounds = self.layer.metric_range(key)
+        if bounds is None or bounds[0] <= value <= bounds[1]:
+            return None
+        low, high = bounds
+        span = "a fraction between 0 and 1 (10% = 0.1)" if bounds == (0, 1) else (
+            f"between {_plain(low)} and {_plain(high)}"
+        )
+        message = f"{key} is {span}, so {_plain(value)} is out of range"
+        as_percent = value / 100
+        if low <= as_percent <= high:
+            message += f"; did you mean {_plain(as_percent)}?"
+        return message
 
     # --- ORDER BY -------------------------------------------------------------
 
@@ -259,7 +286,7 @@ class _Validator:
 
     def _period(self) -> None: #this function checks the period specified in the query. It ensures that if a period is specified, it must be one of the known period names defined in the SemanticLayer. If the period is not recognized, it raises a validation error indicating that the period is unknown and provides a list of expected period names. If no period is specified or if the period is of kind "LAST_N_DAYS" or "RANGE", it does not perform any validation.
         period = self.ast.period
-        if period is None or period.kind in ("LAST_N_DAYS", "RANGE"):
+        if period is None or period.kind in COUNTED_PERIODS or period.kind == "RANGE":
             return
         if period.kind not in self.layer.period_names: #layer is the semantic layer and it specifies the known period names.
             known = ", ".join(self.layer.period_names)
@@ -369,3 +396,9 @@ class _Validator:
                             f"{kind} {name.canonical!r} reads blocked column "
                             f"{table}.{column}"
                         )
+
+
+def _plain(number: Decimal) -> str:
+    """A Decimal without exponent or trailing zeros, for messages: 1E+1 -> 10, 0.100 -> 0.1."""
+    text = format(number, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text

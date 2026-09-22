@@ -68,6 +68,13 @@ measures:
     { agg: COUNT, expr: "*", filter: "r.TD_BD = 'Business Decline'", requires_join: [response_master] }
   technical_decline_count:
     { agg: COUNT, expr: "*", filter: "r.TD_BD = 'Technical Decline'", requires_join: [response_master] }
+  # amounts by outcome, for the outcome-split metrics below (E20)
+  success_amount:
+    { agg: SUM, expr: "t.amt", filter: "r.TD_BD = 'Success'", requires_join: [response_master] }
+  business_decline_amount:
+    { agg: SUM, expr: "t.amt", filter: "r.TD_BD = 'Business Decline'", requires_join: [response_master] }
+  technical_decline_amount:
+    { agg: SUM, expr: "t.amt", filter: "r.TD_BD = 'Technical Decline'", requires_join: [response_master] }
 
 # ---------------------------------------------------------------------
 # METRICS
@@ -85,6 +92,9 @@ measures:
 #   unit_scalable           : may be divided by lakh/crore via IN clause
 #   money                   : monetary metric (affects unit + success default)
 #   emits_assumption        : assumption(s) shown whenever this metric is used
+#   range                   : [low, high] the metric can take. Rates are fractions,
+#                             so a HAVING threshold outside [0, 1] (e.g. `< 10` for
+#                             "under 10%") is rejected with a hint to write 0.1
 # NOTE: value = SUM(amt), volume = COUNT(*).  (Payments convention.)
 # ---------------------------------------------------------------------
 metrics:
@@ -134,6 +144,7 @@ metrics:
     default_success_filter: false
     money: false
     emits_assumption: active_card_denom
+    range: [0, 1]                       # a fraction: 10% = 0.1
     label: "Active card rate"
     note: "denominator = total rows in card_master"
 
@@ -141,19 +152,87 @@ metrics:
     ratio: [success_count, txn_count]
     default_success_filter: false       # computed OVER all txns, never pre-filtered
     money: false
+    range: [0, 1]                       # a fraction: 10% = 0.1
     label: "Success rate"
 
   business_decline_rate:
     ratio: [business_decline_count, txn_count]
     default_success_filter: false
     money: false
+    range: [0, 1]                       # a fraction: 10% = 0.1
     label: "Business decline rate"
 
   technical_decline_rate:
     ratio: [technical_decline_count, txn_count]
     default_success_filter: false
     money: false
+    range: [0, 1]                       # a fraction: 10% = 0.1
     label: "Technical decline rate"
+
+# --- split by outcome (E20) ------------------------------------------
+# One column per outcome, so success / business decline / technical decline sit
+# side by side in one row. `BY status` answers the same question as three ROWS;
+# these metrics answer it as three COLUMNS, and can be mixed freely.
+
+  success_value:                       # Success only, whatever else the query asks for
+    measure: success_amount
+    default_success_filter: false       # the outcome is in the metric, not a filter
+    unit_scalable: true
+    money: true
+    label: "Successful value (₹)"
+
+  success_volume:
+    measure: success_count
+    default_success_filter: false
+    money: false
+    label: "Successful volume"
+
+  success_ats:
+    ratio: [success_amount, success_count]
+    default_success_filter: false
+    unit_scalable: true
+    money: true
+    label: "Successful average ticket size (₹)"
+
+  business_decline_value:                       # Business Decline only, whatever else the query asks for
+    measure: business_decline_amount
+    default_success_filter: false       # the outcome is in the metric, not a filter
+    unit_scalable: true
+    money: true
+    label: "Business-declined value (₹)"
+
+  business_decline_volume:
+    measure: business_decline_count
+    default_success_filter: false
+    money: false
+    label: "Business-declined volume"
+
+  business_decline_ats:
+    ratio: [business_decline_amount, business_decline_count]
+    default_success_filter: false
+    unit_scalable: true
+    money: true
+    label: "Business-declined average ticket size (₹)"
+
+  technical_decline_value:                       # Technical Decline only, whatever else the query asks for
+    measure: technical_decline_amount
+    default_success_filter: false       # the outcome is in the metric, not a filter
+    unit_scalable: true
+    money: true
+    label: "Technically declined value (₹)"
+
+  technical_decline_volume:
+    measure: technical_decline_count
+    default_success_filter: false
+    money: false
+    label: "Technically declined volume"
+
+  technical_decline_ats:
+    ratio: [technical_decline_amount, technical_decline_count]
+    default_success_filter: false
+    unit_scalable: true
+    money: true
+    label: "Technically declined average ticket size (₹)"
 
 # ---------------------------------------------------------------------
 # DIMENSIONS
@@ -385,7 +464,8 @@ modifiers:
     # (because `date` is a string column) and emits plain string comparisons
     # like:  t.date >= '2025-12-01' AND t.date <= '<reference_date>'
     # Every window includes both ends.
-    specs: [FTD, WTD, MTD, QTD, YTD, "LAST <n> DAYS", "FROM '<date>' TO '<date>'"]
+    specs: [FTD, WTD, MTD, QTD, YTD, "LAST <n> DAYS", "LAST <n> MONTHS",
+            "FROM '<date>' TO '<date>'"]
     meaning:
       FTD: "for the day = reference_date only"
       WTD: "week-to-date: Monday of ref week .. reference_date"
@@ -395,6 +475,9 @@ modifiers:
       # exactly n days, both ends inclusive: LAST 1 DAYS == FTD.
       # Emits period_anchor + last_n_days_window.
       "LAST <n> DAYS": "rolling window: (reference_date - (n-1) days) .. reference_date"
+      # whole calendar months, the current (possibly partial) one included:
+      # 5 months from 2025-12-31 is 2025-08-01 .. 2025-12-31, not 150 days.
+      "LAST <n> MONTHS": "1st of (reference month - (n-1)) .. reference_date"
       # absolute range, NOT anchored to reference_date. Dates must be real
       # 'YYYY-MM-DD' dates with start <= end. Emits date_range_inclusive only.
       "FROM '<date>' TO '<date>'": "explicit range: start .. end"
@@ -456,7 +539,7 @@ semantics:
     emits_assumption: [unit_crore, unit_lakh]  # the one matching the IN clause
 
   period_anchor:
-    rule: "Relative periods (FTD..YTD, LAST n DAYS) are computed against reference_date (= MAX date in data). FROM .. TO ranges are absolute and do not emit this."
+    rule: "Relative periods (FTD..YTD, LAST n DAYS, LAST n MONTHS) are computed against reference_date (= MAX date in data). FROM .. TO ranges are absolute and do not emit this."
     emits_assumption: period_anchor
 
   period_window:
@@ -466,7 +549,7 @@ semantics:
       reference date ("today") plus the n-1 days before it, so exactly n
       days (emitted alongside period_anchor). FROM .. TO includes both the
       start and the end date.
-    emits_assumption: [last_n_days_window, date_range_inclusive]  # by period kind
+    emits_assumption: [last_n_days_window, last_n_months_window, date_range_inclusive]  # by period kind
 
 # ---------------------------------------------------------------------
 # CHART INFERENCE
@@ -499,6 +582,7 @@ assumptions:
   unit_lakh:        "Value shown in ₹ lakh."
   period_anchor:    "Period computed relative to the latest transaction date ({ref}), as the dataset is historical."
   last_n_days_window: "Last {n} days = {ref} (treated as today) plus the {n_minus_1} days before it: {start} to {ref}."
+  last_n_months_window: "Last {n} months = the calendar months {start_month} to {end_month} ({start} to {ref}); the last one may be partial."
   date_range_inclusive: "Date range includes both ends: {start} to {end}, inclusive."
   chart_fallback:   "Requested {requested} chart isn't suitable for this result; showing {actual} instead."
   forced_limit:     "No limit given; results capped at {limit} rows."

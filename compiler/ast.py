@@ -24,6 +24,7 @@ COMPARISON_OPS = frozenset({"=", "!=", ">", ">=", "<", "<="})
 TEXT_OPS = frozenset({"=", "!="})  # a single text value
 LIST_OPS = frozenset({"IN", "NOT IN"})  # a tuple of text values
 SORT_DIRECTIONS = frozenset({"ASC", "DESC"})
+COUNTED_PERIODS = frozenset({"LAST_N_DAYS", "LAST_N_MONTHS"})  # the kinds that take n
 SUCCESS_FILTER_MODES = frozenset({"none", "where", "conditional"})
 
 
@@ -31,7 +32,7 @@ SUCCESS_FILTER_MODES = frozenset({"none", "where", "conditional"})
 class Period:
     """The PERIOD clause.
     One field on QueryAST holds the whole clause, so a query with two periods cannot
-    be represented. `n` is set only for `PERIOD LAST n DAYS`; `start`/`end` only for
+    be represented. `n` is set only for `PERIOD LAST n DAYS|MONTHS`; `start`/`end` only for
     `PERIOD FROM 'YYYY-MM-DD' TO 'YYYY-MM-DD'`.
 
     RANGE dates are `datetime.date`, not strings: the parser converts them, so a
@@ -39,15 +40,15 @@ class Period:
     nothing but a well-formed date literal can reach the SQL. Both ends are inclusive.
     """
 
-    kind: str  #"FTD" | "WTD" | "MTD" | "QTD" | "YTD" | "LAST_N_DAYS" | "RANGE"
+    kind: str  # "FTD" | "WTD" | "MTD" | "QTD" | "YTD" | "LAST_N_DAYS" | "LAST_N_MONTHS" | "RANGE"
     n: int | None = None
     start: date | None = None
     end: date | None = None
 
     def __post_init__(self) -> None:
-        if self.kind == "LAST_N_DAYS" and self.n is None:
-            raise ValueError("Period kind LAST_N_DAYS requires n")
-        if self.n is not None and self.kind != "LAST_N_DAYS":
+        if self.kind in COUNTED_PERIODS and self.n is None:
+            raise ValueError(f"Period kind {self.kind} requires n")
+        if self.n is not None and self.kind not in COUNTED_PERIODS:
             raise ValueError(f"Period kind {self.kind!r} does not take n (got n={self.n})")
         if self.kind == "RANGE":
             if self.start is None or self.end is None:

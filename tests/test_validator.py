@@ -244,6 +244,37 @@ def test_unknown_alias_in_config_is_rejected():
 
 # --- the config file itself ---------------------------------------------------
 
+# --- rates are fractions ---------------------------------------------------------
+
+@pytest.mark.parametrize("dsl, message", [
+    ("SHOW business_decline_rate BY merchant HAVING business_decline_rate < 10",
+     "business_decline_rate is a fraction between 0 and 1 (10% = 0.1), "
+     "so 10 is out of range; did you mean 0.1?"),
+    ("SHOW success_rate BY issuer HAVING success_rate > 85.5",
+     "success_rate is a fraction between 0 and 1 (10% = 0.1), "
+     "so 85.5 is out of range; did you mean 0.855?"),
+    ("SHOW success_rate BY issuer HAVING success_rate > 250",   # not a percentage either
+     "success_rate is a fraction between 0 and 1 (10% = 0.1), so 250 is out of range"),
+])
+def test_a_rate_threshold_outside_0_to_1_is_rejected(dsl, message):
+    assert errors(dsl) == [message]
+
+
+@pytest.mark.parametrize("dsl", [
+    "SHOW business_decline_rate BY merchant HAVING business_decline_rate < 0.1",
+    "SHOW success_rate BY issuer HAVING success_rate >= 0 AND success_rate <= 1",  # ends included
+    "SHOW value BY merchant HAVING value > 30000",           # no range: anything goes
+])
+def test_thresholds_in_range_pass(dsl):
+    assert check(dsl).ast.having
+
+
+def test_every_rate_metric_is_marked_as_a_fraction():
+    layer = SemanticLayer.load()
+    rates = [k for k in layer.metrics if k.endswith("_rate")]
+    assert rates and all(layer.metric_range(k) == (0, 1) for k in rates)
+
+
 def test_month_can_be_filtered_despite_commas_in_its_column():
     # SUBSTRING(t.date,1,7) is one column; its commas are inside parentheses
     query = check("SHOW volume BY issuer WHERE month = '2025-03'")
@@ -290,6 +321,9 @@ def test_every_multi_column_dimension_has_a_filter_column():
      "emits unknown assumption 'nope'"),
     ({"metrics": {"x": {"measure": "m", "default_success_filter": True}},
       "measures": {"m": {"agg": "SUM", "expr": "t.amt"}}}, "needs a condition"),
+    ({"metrics": {"x": {"sql": "COUNT(*)", "range": [1, 0]}}}, "range must be [low, high]"),
+    ({"metrics": {"x": {"sql": "COUNT(*)", "range": "0-1"}}}, "range must be [low, high]"),
+    ({"metrics": {"x": {"sql": "COUNT(*)", "range": [0, "high"]}}}, "range must be [low, high]"),
 ])
 def test_bad_config_fails_at_load(broken, message):
     with pytest.raises(ConfigError) as exc:

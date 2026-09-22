@@ -23,6 +23,7 @@ there are two types of aliases - named aliases (defined in config.yaml) and alia
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Optional, Sequence, Tuple
@@ -174,6 +175,8 @@ class SemanticLayer:
             for assumption in [emitted] if isinstance(emitted, str) else emitted:
                 if assumption not in self.assumptions:
                     problems.append(f"metric {key!r} emits unknown assumption {assumption!r}")
+            if "range" in entry and self.metric_range(key) is None:
+                problems.append(f"metric {key!r} range must be [low, high] numbers with low <= high")
 
         if any(m.get("default_success_filter") for m in self.metrics.values()):
             if not self.success_condition:
@@ -191,6 +194,17 @@ class SemanticLayer:
         if "measure" in entry:
             return (entry["measure"],)
         return tuple(entry.get("ratio", ()))
+
+    def metric_range(self, key: str) -> Optional[Tuple[Decimal, Decimal]]:
+        """(low, high) a metric can take, e.g. (0, 1) for a rate; None if unbounded or malformed."""
+        bounds = self.metrics[key].get("range")
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            return None
+        try:
+            low, high = (Decimal(str(b)) for b in bounds)
+        except (InvalidOperation, ValueError):
+            return None
+        return (low, high) if low <= high else None
 
     def filter_column(self, key: str) -> Optional[str]:
         """The one column a WHERE on this dimension compares, or None if there isn't one.
