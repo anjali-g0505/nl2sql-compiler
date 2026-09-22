@@ -1,0 +1,65 @@
+/* IntentQL design tokens. Every colour in the app comes from here.
+   Dark is the shipping theme; the names are theme-neutral so a light set can be added. */
+
+:root {
+  /* ink scale: blue-leaning neutrals carry the interface */
+  --ink-900: #0a0f1a;   /* page */
+  --ink-800: #101725;   /* raised surface: cards */
+  --ink-700: #172032;   /* inset surface: code blocks, table header */
+  --ink-650: #1c2537;   /* hover on inset */
+  --ink-600: #232e42;   /* borders */
+  --ink-zebra: #121a29; /* even row over a sticky first column */
+  --ink-400: #6b7a94;   /* muted text, punctuation */
+  --ink-200: #b9c4d6;   /* secondary text */
+  --ink-050: #eef2f8;   /* primary text */
+
+  /* brand signal colours: syntax, series, status — never chrome */
+  --amber: #ffb343;
+  --cyan: #42eaff;
+  --blue: #4272ff;
+  --orange: #ff7e42;
+  /* #4272FF is only ~3.5:1 on --ink-800, so text and thin strokes use this lift */
+  --blue-lift: #8aa5ff;
+
+  --accent: var(--blue);       /* primary action only */
+  --accent-ink: #ffffff;
+  --focus: var(--cyan);
+  --warn: var(--amber);
+  --danger: #ff6b6b;           /* desaturated, sits with the palette */
+
+  /* syntax mapping, shared by the DSL and SQL blocks */
+  --syn-keyword: var(--amber);
+  --syn-metric: var(--cyan);
+  --syn-dimension: var(--blue-lift);
+  --syn-literal: var(--orange);
+  --syn-punct: var(--ink-400);
+
+  /* chart series, in order; same hues as the syntax tokens they refer to */
+  --series-1: var(--cyan);
+  --series-2: var(--blue-lift);
+  --series-3: var(--amber);
+  --series-4: var(--orange);
+
+  --radius-sm: 4px;   /* inputs, chips */
+  --radius-md: 8px;   /* cards */
+  --radius-lg: 10px;  /* composer */
+  --shadow: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 8px 24px rgb(0 0 0 / 0.4);
+
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+
+  /* 1.25 scale, base 15px */
+  --t-12: 12px;
+  --t-13: 13px;
+  --t-15: 15px;
+  --t-19: 19px;
+  --t-24: 24px;
+  --t-30: 30px;
+  --t-38: 38px;
+
+  --column: 880px;
+
+  /* exported chart PNGs are pasted into light documents, so they get a white bed */
+  --export-bg: #ffffff;
+}
