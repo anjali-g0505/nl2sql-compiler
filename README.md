@@ -1,5 +1,10 @@
-# nl2sql-compiler
-# project to use natural language to query the sql database
+# IntentQL
+**From business questions to financial insights.**
+
+Natural language -> DSL -> SQL over a card-payments database. The LLM only writes
+DSL; a compiler turns that into SQL, so every answer is grounded, auditable and
+read-only. The React app shows the chart, the DSL, the SQL and the assumptions, and
+each of those can be copied.
 
 ## Project layout
 
@@ -7,6 +12,8 @@
 app/
   main.py        FastAPI app: /query, /clarifications/{id}, /admin/refresh-indexes, /health
   pipeline.py    The app contract: question/DSL -> ok | needs_clarification | error, one LLM retry
+  translator.py  NL -> DSL on Groq; prompt built from config.yaml + grammar.md
+  charts.py      Chart choice from the result shape (KPI / BAR / LINE / PIE / TABLE)
   db.py          MySQL connection pool + execute_query() (raw SQL, no ORM)
   config.py      Settings read from environment / .env
 compiler/
@@ -17,8 +24,10 @@ compiler/
   resolver.py    ValidatedQuery -> ResolvedQuery (filter values matched to real data)
   codegen.py     ResolvedQuery -> CompiledQuery (MySQL + assumptions, oracle-exact layout)
   indexes.py     DB-backed value indexes + cached reference date: build, atomic refresh, nightly schedule
-aliases.yaml     Hand-maintained value aliases (SBI -> ISS001), merged into indexes
   ast.py         Frozen pipeline types: QueryAST -> ValidatedQuery -> CompiledQuery, Assumption
+frontend/        React + Vite chat app (charts, clarifications, audit panel, copy actions)
+scripts/
+  eval_translator.py  Scores a Groq model on seen + held-out questions
 tests/
   test_lexer.py  pytest suite for the lexer
   test_ast.py    pytest suite for the AST types
@@ -28,6 +37,9 @@ tests/
   test_indexes.py    pytest suite for the index registry (fake DB, no MySQL needed)
   test_codegen.py    pytest suite for codegen (E1-E19 read straight from grammar.md)
   test_pipeline.py   pytest suite for the app contract (scripted LLM, fake DB)
+  test_translator.py pytest suite for the Groq translator (HTTP mocked, no key needed)
+  test_charts.py     pytest suite for chart choice
+aliases.yaml     Hand-maintained value aliases (SBI -> ISS001), merged into indexes
 config.yaml      Semantic layer (measures, metrics, dimensions, joins) — source of truth
 grammar.md       Frozen DSL spec + NL -> DSL -> SQL oracle
 generate_data.py Deterministic synthetic data -> output/*.csv, output/*.sql
@@ -57,7 +69,10 @@ regenerating data, run `docker compose down -v` first (this wipes the database).
 Copy-Item .env.example .env    # then set MYSQL_PASSWORD to match docker-compose.yml
 ```
 
-Real environment variables override `.env`.
+Set `GROQ_API_KEY` (free at https://console.groq.com/keys) to enable natural-language
+questions. `GROQ_MODEL` defaults to `openai/gpt-oss-120b`, and `GROQ_FALLBACK_MODEL`
+(`openai/gpt-oss-20b`) is used when the main model is rate limited. Without a key, the
+app still runs DSL. Real environment variables override `.env`.
 
 ### 3. Install dependencies
 
@@ -81,6 +96,22 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 
+### 4b. Run the frontend
+
+Needs Node 20.19+. For development, with hot reload (it proxies API calls to :8000):
+
+```powershell
+cd frontend
+npm install        # once
+npm run dev        # http://localhost:5173
+```
+
+Or build it once and let FastAPI serve it at http://127.0.0.1:8000/:
+
+```powershell
+cd frontend; npm run build; cd ..
+```
+
 ### 5. Check it
 
 ```powershell
@@ -96,19 +127,32 @@ If MySQL is unreachable or the query fails, `/test-query` returns HTTP 500 with
 ### 6. Ask a query
 
 `POST /query` takes `{"question": "..."}` (translated to DSL by the LLM) or
-`{"dsl": "..."}` (run as-is). Until the LLM stage is wired in, send DSL; a question
-returns 503. Every response has a `status`:
+`{"dsl": "..."}` (run as-is). Without `GROQ_API_KEY` a question returns 503. Every
+response has a `status`:
 
 | `status` | HTTP | Meaning |
 |---|---|---|
-| `ok` | 200 | `dsl`, `sql` (display form), `chart_type`, `assumptions` (`key` + `text`), `columns`, `rows`, `row_count`, `attempts` |
+| `ok` | 200 | `dsl`, `sql` (display form), `chart_type`, `assumptions` (`key` + `text`), `dimension_columns` / `metric_columns` / `labels` / `unit` (for drawing), `columns`, `rows`, `row_count`, `attempts` |
 | `needs_clarification` | 200 | A value was ambiguous or isn't a known entity. Answer each of `questions` (`id`, `message`, `options`) via `POST /clarifications/{clarification_id}` with `{"answers": {"q1": "<option id or typed value>"}}`. Expires after 30 minutes; answerable once. |
-| `error` | 422 / 404 / 502 / 503 | `stage` (`request`, `translate`, `parse`, `validate`, `resolve`, `clarification`, `compile`) and `errors` |
+| `error` | 422 / 404 / 500 / 502 / 503 | `stage` (`request`, `translate`, `scope`, `parse`, `validate`, `resolve`, `clarification`, `compile`) and `errors` |
 
 A question's DSL gets **one** retry: syntax errors, unknown names and unknown
 enum/catalogue values go back to the LLM with the exact errors (and the valid values).
 Ambiguous values and unknown entities are asked of the user instead, and answering
 resumes the same query without another LLM call.
+
+`scope` means the model judged the question outside this data (e.g. the weather).
+Only `SELECT` statements are ever executed.
+
+### 7. Check the translator's accuracy
+
+```powershell
+.\.venv\Scripts\python.exe scripts\eval_translator.py              # seen + held-out, ~6 min
+.\.venv\Scripts\python.exe scripts\eval_translator.py --set held-out --model openai/gpt-oss-20b
+```
+
+It compiles each answer and compares its SQL with the expected query's, so equivalent
+DSL counts as correct. It pauses between questions to stay under Groq's free-tier limit.
 
 ```powershell
 curl.exe -X POST http://127.0.0.1:8000/query -H "content-type: application/json" -d '{\"dsl\": \"SHOW volume BY issuer WHERE status = ''decline''\"}'
@@ -149,9 +193,11 @@ Bare `pytest` can fail with `ModuleNotFoundError: No module named 'app'`.
 |---|---|
 | `tests/test_lexer.py` | Token sequences for the `grammar.md` oracle strings (E1, E2, E4–E8, E10, E14–E19), comparison operators incl. `!=`, `IN`/`NOT IN` lists, integers vs exact decimals, `FROM`/`TO` date ranges, case handling, positions, whitespace, string literals, and `LexError` cases (unterminated strings, malformed numbers, unquoted dates, `<>`, unexpected characters) |
 | `tests/test_ast.py` | Hand-built `QueryAST` shapes for representative DSL queries (including `HAVING` thresholds, numeric `WHERE` filters, `IN` lists, `!=` and date ranges), frozen-ness of every type, `Period` (incl. `RANGE`), `Condition` and `MetricCondition` validation, `Assumption` rendering, and `ValidatedQuery`/`CompiledQuery` composition |
-| `tests/test_validator.py` | Join sets and success-filter decisions checked against the `grammar.md` oracle, alias/case resolution, kind mix-ups, `HAVING`/`ORDER BY`/unit/period/chart rules, contradictory filters, filtering by `month`, the PII guardrail, and `config.yaml` self-checks (incl. measure/metric shapes) |
+| `tests/test_validator.py` | Join sets and success-filter decisions checked against the `grammar.md` oracle, alias/case resolution, kind mix-ups, `HAVING`/`ORDER BY`/unit/period/chart rules, contradictory filters, rate thresholds outside 0–1 (with a "did you mean 0.1?" hint), filtering by `month`, the PII guardrail, and `config.yaml` self-checks (incl. measure/metric shapes) |
 | `tests/test_indexes.py` | Sources read from config, index building and one-source refresh, aliases merged in, a failed source keeping its previous index while others rebuild, snapshot semantics, refresh-age reporting, the nightly schedule, and the cached reference date (refreshed with the indexes, kept on failure, pinnable in config) |
 | `tests/test_resolver.py` | Normalization, the five resolution outcomes (success, corrected, ambiguous, unknown, skipped), enum values from config, catalogue/entity resolution through a fake index, `IN` lists, and that numeric conditions and the rest of the query are untouched |
 | `tests/test_parser.py` | `QueryAST` for the `grammar.md` oracle strings and an all-clauses query, optional `ORDER BY` direction, case handling, unresolved names, and `ParseError` cases (clause order and duplicates, malformed conditions and `IN` lists, bad dates, non-positive `LIMIT`/`LAST`, error positions) |
-| `tests/test_codegen.py` | The SQL and assumption keys of every `grammar.md` oracle example (E1–E19, parsed from the file itself), identical SQL for the same query written two ways, no invented `LIMIT`, display SQL vs `%s` placeholders + params (incl. quotes in database values), the success condition pushed into every measure, unit scaling, money thresholds back in rupees, `month` filters, `ORDER BY` defaults and dimension ordering, multiple `HAVING` conditions, every period window, assumption values and rendering, and refusing unresolved values |
+| `tests/test_codegen.py` | The SQL and assumption keys of every `grammar.md` oracle example (E1–E20, parsed from the file itself), identical SQL for the same query written two ways, no invented `LIMIT`, display SQL vs `%s` placeholders + params (incl. quotes in database values), the success condition pushed into every measure, unit scaling, money thresholds back in rupees, `month` filters, `ORDER BY` defaults and dimension ordering, multiple `HAVING` conditions, every period window, assumption values and rendering, and refusing unresolved values |
 | `tests/test_pipeline.py` | Request shape, DSL end to end (display SQL vs executed SQL + params), the forced limit applied at execution (and its assumption only when rows were cut), one LLM retry with the exact errors and valid enum/catalogue values, no second retry, translator failures, DSL input never retried, ambiguous/unknown-entity clarifications, answering by option id or typed value, re-asking when still unclear, missing answers, one-time and expiring ids |
+| `tests/test_translator.py` | The prompt is built from config + grammar.md (every name, enum values, all 19 examples) and stays under ~2.5K tokens, reply cleanup (code fences, `DSL:` prefix), request settings (temperature 0, low reasoning effort, none for non-reasoning models), the reference year, the retry message, `CANNOT:` as out of scope, rate-limit fallback to the second model, and HTTP/timeout/malformed-reply failures |
+| `tests/test_charts.py` | The inferred chart for each oracle shape (KPI, BAR, LINE, TABLE for one row / 2+ dims / 2+ metrics), explicit `AS` kept when drawable, and fallback with a `chart_fallback` assumption (too many pie slices, several metrics, negative values, KPI over several rows) |
