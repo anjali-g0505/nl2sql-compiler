@@ -11,11 +11,19 @@ app/
 compiler/
   lexer.py       DSL string -> token list
   parser.py      Token list -> QueryAST (recursive descent, syntax only)
+  semantic_layer.py  Loads + self-checks config.yaml; name/alias/join lookups
+  validator.py   QueryAST -> ValidatedQuery (grounding, joins, guardrails)
+  resolver.py    ValidatedQuery -> ResolvedQuery (filter values matched to real data)
+  indexes.py     DB-backed value indexes: build, atomic refresh, nightly schedule
+aliases.yaml     Hand-maintained value aliases (SBI -> ISS001), merged into indexes
   ast.py         Frozen pipeline types: QueryAST -> ValidatedQuery -> CompiledQuery
 tests/
   test_lexer.py  pytest suite for the lexer
   test_ast.py    pytest suite for the AST types
   test_parser.py pytest suite for the parser
+  test_validator.py  pytest suite for the validator + semantic layer
+  test_resolver.py   pytest suite for value resolution
+  test_indexes.py    pytest suite for the index registry (fake DB, no MySQL needed)
 config.yaml      Semantic layer (metrics, dimensions, joins) — source of truth
 grammar.md       Frozen DSL spec + NL -> DSL -> SQL oracle
 generate_data.py Deterministic synthetic data -> output/*.csv, output/*.sql
@@ -116,4 +124,7 @@ Bare `pytest` can fail with `ModuleNotFoundError: No module named 'app'`.
 |---|---|
 | `tests/test_lexer.py` | Token sequences for the `grammar.md` oracle strings (E1, E2, E4–E8, E10, E14–E19), comparison operators incl. `!=`, `IN`/`NOT IN` lists, integers vs exact decimals, `FROM`/`TO` date ranges, case handling, positions, whitespace, string literals, and `LexError` cases (unterminated strings, malformed numbers, unquoted dates, `<>`, unexpected characters) |
 | `tests/test_ast.py` | Hand-built `QueryAST` shapes for representative DSL queries (including `HAVING` thresholds, numeric `WHERE` filters, `IN` lists, `!=` and date ranges), frozen-ness of every type, `Period` (incl. `RANGE`), `Condition` and `MetricCondition` validation, and `ValidatedQuery`/`CompiledQuery` composition |
+| `tests/test_validator.py` | Join sets and success-filter decisions checked against the `grammar.md` oracle, alias/case resolution, kind mix-ups, `HAVING`/`ORDER BY`/unit/period/chart rules, contradictory filters, the PII guardrail, and `config.yaml` self-checks |
+| `tests/test_indexes.py` | Sources read from config, index building and one-source refresh, aliases merged in, a failed source keeping its previous index while others rebuild, snapshot semantics, refresh-age reporting, and the nightly schedule |
+| `tests/test_resolver.py` | Normalization, the five resolution outcomes (success, corrected, ambiguous, unknown, skipped), enum values from config, catalogue/entity resolution through a fake index, `IN` lists, and that numeric conditions and the rest of the query are untouched |
 | `tests/test_parser.py` | `QueryAST` for the `grammar.md` oracle strings and an all-clauses query, optional `ORDER BY` direction, case handling, unresolved names, and `ParseError` cases (clause order and duplicates, malformed conditions and `IN` lists, bad dates, non-positive `LIMIT`/`LAST`, error positions) |

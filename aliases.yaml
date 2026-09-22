@@ -1,0 +1,21 @@
+# Hand-maintained aliases for value resolution: what people call things, mapped to
+# the id they mean. Merged into the entity indexes at build time, so a name here is
+# an EXACT match (no fuzzy scoring needed) and outranks any guess.
+#
+# Shape:  <entity name from config.value_resolution.entities>:
+#           <id in that table>: [alias, alias, ...]
+#
+# Add an entry whenever a real question fails to resolve — that is cheaper and more
+# predictable than loosening the fuzzy threshold for everyone.
+
+issuer:
+  ISS001: [SBI, State Bank, SBI Bank]
+  ISS002: [HDFC]
+  ISS003: [HSBC]
+
+acquirer:
+  ACQ001: [Axis]
+  ACQ002: [ICICI]
+
+merchant: {}
+  # MER0001: [FreshBasket, Fresh Basket]
