@@ -16,6 +16,9 @@ Design points that matter in operation:
     reported as "merchant list last refreshed <time>" rather than a bare failure.
   * Nothing here knows what a merchant is: sources come from config, aliases from
     aliases.yaml, so a new entity is a config change.
+  * The reference date ("today" for MTD, LAST n DAYS, ...) = MAX(date) is cached here
+    too and refreshed in the same pass, since it only changes when the data does.
+    Looking it up per query would let "MTD" shift mid-session for no benefit.
 
 No database is required to use this module — `fetch` is injected, which is also how
 the tests run it.
@@ -25,7 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -38,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 Rows = Sequence[Mapping[str, object]]
 Fetch = Callable[[str], Rows]
+REFERENCE_DATE = "reference_date"  # its name in statuses and refresh(only=...)
 
 
 @dataclass(frozen=True)
@@ -45,7 +49,7 @@ class SourceStatus:
     """What happened to one index the last time it was built."""
 
     name: str
-    kind: str  # "catalog" | "entity"
+    kind: str  # "catalog" | "entity" | "reference_date"
     rows: int = 0
     last_refreshed: Optional[datetime] = None
     error: Optional[str] = None
@@ -121,6 +125,7 @@ class IndexRegistry:
         self._aliases = aliases if aliases is not None else load_aliases(self.layer)
         self._indexes: Dict[str, ValueIndex] = {}
         self._statuses: Dict[str, SourceStatus] = {}
+        self._reference_date: Optional[date] = None
         self._write_lock = threading.Lock()  # one refresh at a time; reads stay lock-free
 
     # --- sources declared in config -------------------------------------------
@@ -164,6 +169,8 @@ class IndexRegistry:
                 if only and name != only:
                     continue
                 statuses.append(self._refresh_one(name, kind, sql))
+            if not only or only == REFERENCE_DATE:
+                statuses.append(self._refresh_reference_date())
         report = RefreshReport(started=started, finished=datetime.now(), statuses=tuple(statuses))
         if report.failures:
             logger.warning(
@@ -195,6 +202,61 @@ class IndexRegistry:
         status = SourceStatus(name=name, kind=kind, rows=len(pairs), last_refreshed=datetime.now())
         self._statuses[name] = status
         return status
+
+    # --- reference date -------------------------------------------------------
+
+    @property
+    def reference_date(self) -> Optional[date]:
+        """'Today' for relative periods: config's pinned date, else the cached MAX(date).
+
+        Refreshed with the indexes (startup, nightly, admin endpoint), i.e. whenever
+        the data may have changed, rather than looked up on every query.
+        """
+        pinned = self.layer.raw.get("reference_date")
+        if pinned:
+            return _to_date(pinned)
+        return self._reference_date
+
+    def _refresh_reference_date(self) -> SourceStatus:
+        name, kind = REFERENCE_DATE, REFERENCE_DATE
+        if self.layer.raw.get("reference_date"):  # pinned in config: nothing to query
+            status = SourceStatus(name=name, kind=kind, rows=1, last_refreshed=datetime.now())
+            self._statuses[name] = status
+            return status
+
+        fact = self.layer.raw.get("fact", {})
+        sql = f"SELECT MAX({fact.get('date_column', 'date')}) AS ref FROM {fact.get('table')}"
+        try:
+            rows = self.fetch(sql)
+            value = rows[0]["ref"] if rows else None
+            if value is None:
+                raise ValueError(f"{fact.get('table')} has no transactions")
+            self._reference_date = _to_date(value)
+        except Exception as exc:  # keep the previous date, as a failed index does
+            logger.exception("Could not refresh the reference date")
+            previous = self._statuses.get(name)
+            status = SourceStatus(
+                name=name,
+                kind=kind,
+                rows=previous.rows if previous else 0,
+                last_refreshed=previous.last_refreshed if previous else None,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            self._statuses[name] = status
+            return status
+
+        status = SourceStatus(name=name, kind=kind, rows=1, last_refreshed=datetime.now())
+        self._statuses[name] = status
+        return status
+
+
+def _to_date(value: object) -> date:
+    """A DATE, DATETIME or 'YYYY-MM-DD...' string -> date."""
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
 
 
 # --- nightly schedule ---------------------------------------------------------

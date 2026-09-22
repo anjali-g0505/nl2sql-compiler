@@ -1,13 +1,21 @@
-"""FastAPI entrypoint. Step 2 scaffold: proves HTTP -> FastAPI -> MySQL -> JSON."""
+"""FastAPI entrypoint.
+
+POST /query takes a question (or DSL) and returns rows, a clarification to answer, or an
+error; POST /clarifications/{id} answers a clarification. The rules for which is which
+live in app/pipeline.py; this module only wires HTTP to it.
+"""
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.db import DatabaseError, execute_query
+from app.pipeline import Outcome, Pipeline
 from compiler.indexes import IndexRegistry, refresh_nightly
 
 logger = logging.getLogger(__name__)
@@ -16,6 +24,9 @@ logger = logging.getLogger(__name__)
 # by hand when new merchants are onboarded. A failed build is logged, not fatal —
 # unresolvable dimensions simply pass their values through until the next refresh.
 index_registry = IndexRegistry()
+
+# translator=None until the LLM stage: questions get a 503, DSL works end to end.
+pipeline = Pipeline(registry=index_registry, execute=execute_query, translator=None)
 
 
 @asynccontextmanager
@@ -52,6 +63,32 @@ async def refresh_indexes(source: Optional[str] = None):
             for s in report.statuses
         ],
     }
+
+
+class QueryRequest(BaseModel):
+    question: Optional[str] = None  # natural language, translated to DSL by the LLM
+    dsl: Optional[str] = None       # or DSL directly (no LLM, no retry)
+
+
+class ClarificationAnswers(BaseModel):
+    answers: Dict[str, str]  # question id ("q1") -> an option id, or a typed value
+
+
+def _respond(outcome: Outcome) -> JSONResponse:
+    # jsonable_encoder: rows hold Decimals and dates straight from MySQL
+    return JSONResponse(status_code=outcome.http_status, content=jsonable_encoder(outcome.body))
+
+
+@app.post("/query")
+def query(request: QueryRequest) -> JSONResponse:
+    """status "ok" (rows), "needs_clarification" (answer via /clarifications/{id}), or "error"."""
+    return _respond(pipeline.ask(question=request.question, dsl=request.dsl))
+
+
+@app.post("/clarifications/{clarification_id}")
+def answer_clarification(clarification_id: str, body: ClarificationAnswers) -> JSONResponse:
+    """Resume a parked query with the user's answers. Same response shape as /query."""
+    return _respond(pipeline.answer(clarification_id, body.answers))
 
 
 @app.exception_handler(DatabaseError)

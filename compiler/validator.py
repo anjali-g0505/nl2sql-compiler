@@ -187,9 +187,7 @@ class _Validator:
         return tuple(resolved)
 
     def _filter_column(self, key: str) -> Optional[str]:
-        entry = self.layer.dimension(key)
-        column = entry.get("filter_column") or entry.get("select", "")
-        return column if column and "," not in column else None
+        return self.layer.filter_column(key)
 
     def _check_contradictions(self, filters: Sequence[Condition]) -> None:
         """`x = 'a' AND x = 'b'` can never match: AND applies to one row. """
@@ -338,7 +336,7 @@ class _Validator:
             if kind:
                 needed += list(self.layer.requires_join(order.key.canonical, kind))
         if success_filter != "none":
-            needed.append("response_master")  # TD_BD lives there
+            needed += list(self.layer.success_joins)  # TD_BD lives in response_master
         return self.layer.order_joins(needed)
 
     # --- PII guardrail --------------------------------------------------------
@@ -359,9 +357,8 @@ class _Validator:
 
         for name in list(dimensions) + list(metrics):
             kind = self.layer.kind_of(name.canonical)
-            entry = self.layer.entry(name.canonical, kind)
-            for fragment in (entry.get("select"), entry.get("filter_column"), entry.get("sql")):
-                for alias, column in QUALIFIED_COLUMN.findall(fragment or ""):
+            for fragment in self.layer.sql_fragments(name.canonical, kind):
+                for alias, column in QUALIFIED_COLUMN.findall(fragment):
                     table = alias_to_table.get(alias)
                     if table is None:
                         self.fail(

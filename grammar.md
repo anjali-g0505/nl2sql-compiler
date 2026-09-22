@@ -108,15 +108,21 @@ outcome dimension (`status` or `response`) in `BY` or `WHERE`. This is what make
 "value by status" (success vs declines) possible — otherwise it could only ever return
 the success slice.
 
-**Opt-in success for counts.** `volume`/`active_cards` have no default filter (they count
-all attempts), but if the user explicitly asks for *successful* or *valid* transactions,
-add the success filter anyway (and the same assumption).
+**Counts have no success default.** `volume`/`active_cards` count all attempts. For
+*successful* or *valid* transactions the NL→DSL step writes the filter explicitly:
+`WHERE status = 'Success'`. That references an outcome dimension, so no implicit filter
+or `success_default` assumption is added: the condition is visible in the DSL itself.
 
 **Mixed metrics.** When a query combines a success-defaulted metric with a
 non-defaulted one (e.g. `volume, value`), do **not** apply the success filter in `WHERE`
 (that would wrongly shrink `volume`). Apply it via conditional aggregation inside the
 money metric only: `SUM(CASE WHEN r.TD_BD='Success' THEN t.amt ELSE 0 END)`. Assumption:
 *"Value-based metrics count only successful transactions; volume counts all attempts."*
+Metrics are built from config `measures` (`SUM(t.amt)`, `COUNT(*)`,
+`COUNT(DISTINCT t.card_id)`, ...), and codegen pushes the condition into **every**
+measure of the metric, so a ratio's denominator is filtered too: `ats` becomes success
+value / success count (E14), and `spend_per_card` counts
+`COUNT(DISTINCT CASE WHEN r.TD_BD='Success' THEN t.card_id END)`.
 
 **Period anchoring.** `reference_date = MAX(card_txns.date)` (the data is historical, so
 wall-clock "MTD" would be empty). Because `date` is a string column, codegen
@@ -190,8 +196,35 @@ KPI; any other single-row result → TABLE, overriding the dimension rules; 2+ d
 compatible with the shape it wins; otherwise fall back and record a `chart_fallback`
 assumption.
 
-**Guardrails.** SELECT-only; a `LIMIT` is forced (config `forced_limit`) when none is
-given; queries that don't ground to known metrics/dimensions/attributes are rejected.
+**Guardrails.** SELECT-only; queries that don't ground to known
+metrics/dimensions/attributes are rejected. When no `LIMIT` is given, the row cap
+(config `forced_limit`) is applied **at execution**, not in the SQL: at most that many
+rows are fetched, and the `forced_limit` assumption is added only if rows were actually
+cut off. The SQL therefore shows exactly what was asked, which is why the examples below
+have no `LIMIT` unless the DSL has one.
+
+**SQL layout and conventions.** Codegen output is deterministic, so identical DSL gives
+byte-identical SQL, and the examples below are matched character for character by the
+tests:
+- One clause per line: `SELECT`, `FROM`, one `JOIN` per table (config declaration
+  order), `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, then `;`.
+- `WHERE`/`HAVING` put the first condition after the keyword and each further one on its
+  own `  AND` line. `WHERE` order: the user's filters as written, then the success
+  filter, then the period.
+- `SELECT` stays on one line up to 100 characters. Longer, each item goes on its own
+  line (indented under the first), and an item still over 100 is split once at its
+  top-level ` / ` (E3, E14).
+- A dimension whose select is an expression gets an alias (`SUBSTRING(t.date,1,7) AS
+  month`); plain columns keep their own name (`i.iss_name`). Metrics are always aliased
+  by their key, which is how `HAVING` and `ORDER BY` refer to them.
+- `ORDER BY`: an explicit clause wins. Otherwise a time dimension sorts by its
+  `default_order` (`ORDER BY month ASC`, E4). Ordering by a dimension uses its alias,
+  or else each of its columns (`ORDER BY m.mcc_code DESC, m.mcc_description DESC`).
+- Text values are written into the displayed SQL as quoted literals (as below). The
+  SQL that actually runs has a `%s` placeholder for each, with the values passed
+  separately, so a value (e.g. a merchant named `McDonald's`) can never change the
+  query's structure. Numbers and dates are written in directly: the parser has already
+  turned them into `Decimal`s and real dates.
 
 ---
 
@@ -201,6 +234,18 @@ The response returns `{ result, dsl, sql, chart_type, assumptions[] }`. The
 `assumptions[]` list is appended to whenever the compiler injects a default, converts a
 unit, anchors a period, forces a limit, or falls back a chart. It renders in the audit
 panel so every inference is visible. Templates live in `config.yaml → assumptions`.
+
+Each assumption is stored as its key plus the values its template needs (e.g.
+`last_n_days_window` with `n`, `ref`, `n_minus_1`, `start`), so it can be re-rendered or
+explained later. Who adds what:
+- **codegen**, in this order: `success_default` or `mixed_metrics`, the unit,
+  the period ones, metric definitions (`active_card_denom`), then one
+  `value_corrected` per filter value the resolver corrected ("Interpreted Credt as
+  Credit for card_type").
+- **execution**: `forced_limit`, only when rows were cut off.
+- **response layer**: `chart_fallback`, since chart choice needs the result's shape.
+
+The assumption lists in the examples below are codegen's.
 
 ---
 
@@ -541,7 +586,7 @@ chart_type: `BAR` (inferred) · assumptions: [] *(volume, no default; `status` r
 Between E1–E19 the oracle exercises every mechanism at least once: no-join scalar, single
 join, two joins, ≥3 joins, month key, all 6 modifiers (filter, period, threshold, top-N,
 unit, chart), `HAVING` thresholds in rupees and in the display unit, relative periods and an
-explicit `FROM … TO` range, a numeric attribute in `WHERE`, `IN` lists and `!=`, the implicit-success default **and** its suppression, opt-in vs no-default counts,
+explicit `FROM … TO` range, a numeric attribute in `WHERE`, `IN` lists and `!=`, the implicit-success default **and** its suppression, no-default counts,
 mixed-metric conditional aggregation, PII-safe customer, and every chart path (KPI, LINE,
 BAR, PIE, TABLE) including a fallback-eligible override. Card-level (`spend_per_card`,
 `active_card_rate`) and rate metrics are covered. New KPIs from the wider list are then

@@ -10,8 +10,10 @@ dialect: mysql
 
 # Reference "today". The dataset is historical (2025), so periods
 # (FTD/WTD/MTD/QTD/YTD/rolling) are anchored to the latest txn date,
-# not the wall clock. Left null -> computed at runtime as
-# MAX(card_txns.date). Pin a string here to freeze it for tests.
+# not the wall clock. Left null -> computed as MAX(card_txns.date) when
+# the value indexes refresh (startup, nightly, /admin/refresh-indexes),
+# i.e. whenever the data may have changed, not on every query.
+# Pin a 'YYYY-MM-DD' string here to freeze it.
 reference_date: null
 
 fact:
@@ -40,54 +42,89 @@ joins:
   card_master:      { alias: c, "on": "t.card_id = c.card_id" }
 
 # ---------------------------------------------------------------------
+# MEASURES
+# The basic aggregates, each written ONCE. Metrics are built from them.
+#   agg            : SUM | COUNT | COUNT_DISTINCT
+#   expr           : the fact column aggregated ("*" for COUNT)
+#   filter         : optional row condition baked into the measure
+#   requires_join  : joins the expr/filter need
+# Because codegen assembles the SQL from these parts, it can push any extra
+# condition (e.g. the success filter for mixed metrics, see E14) into any
+# measure mechanically, so no metric's SQL has to be written twice:
+#   SUM(x)            -> SUM(CASE WHEN c THEN x ELSE 0 END)
+#   COUNT(*)          -> SUM(CASE WHEN c THEN 1 ELSE 0 END)
+#   COUNT(DISTINCT x) -> COUNT(DISTINCT CASE WHEN c THEN x END)
+# A measure's own filter renders the same way, which is how success_count
+# becomes SUM(CASE WHEN r.TD_BD = 'Success' THEN 1 ELSE 0 END).
+# ---------------------------------------------------------------------
+measures:
+  amount_sum:     { agg: SUM, expr: "t.amt" }
+  txn_count:      { agg: COUNT, expr: "*" }
+  card_count:     { agg: COUNT_DISTINCT, expr: "t.card_id" }
+  customer_count: { agg: COUNT_DISTINCT, expr: "t.customer_id" }
+  success_count:
+    { agg: COUNT, expr: "*", filter: "r.TD_BD = 'Success'", requires_join: [response_master] }
+  business_decline_count:
+    { agg: COUNT, expr: "*", filter: "r.TD_BD = 'Business Decline'", requires_join: [response_master] }
+  technical_decline_count:
+    { agg: COUNT, expr: "*", filter: "r.TD_BD = 'Technical Decline'", requires_join: [response_master] }
+
+# ---------------------------------------------------------------------
 # METRICS
-#   sql                     : aggregate expression (t = fact alias)
+# Each metric is exactly one of:
+#   measure: <name>           -> that measure
+#   ratio: [<num>, <den>]     -> num / NULLIF(den,0)
+#   sql: "<expression>"       -> used verbatim; for shapes measures can't express
+#                                (a subquery denominator). Can't take a pushed-in
+#                                condition, so it may not be default_success_filter.
+# Other keys:
 #   default_success_filter  : if true, restrict to TD_BD='Success' UNLESS
 #                             the query references an outcome dimension
 #                             (status/response) — see semantics.implicit_success
-#   requires_join           : joins this metric always needs
+#   requires_join           : extra joins; a measure's joins are added automatically
 #   unit_scalable           : may be divided by lakh/crore via IN clause
 #   money                   : monetary metric (affects unit + success default)
+#   emits_assumption        : assumption(s) shown whenever this metric is used
 # NOTE: value = SUM(amt), volume = COUNT(*).  (Payments convention.)
 # ---------------------------------------------------------------------
 metrics:
 
   volume:
-    sql: "COUNT(*)"
+    measure: txn_count
     default_success_filter: false      # counts ALL attempts by default
     money: false
     label: "Volume (transaction count)"
 
   value:
-    sql: "SUM(t.amt)"
+    measure: amount_sum
     default_success_filter: true
     unit_scalable: true
     money: true
     label: "Value (₹)"
 
   ats:                                  # average ticket size = value / volume
-    sql: "SUM(t.amt) / NULLIF(COUNT(*),0)"
+    ratio: [amount_sum, txn_count]
     default_success_filter: true
     unit_scalable: true
     money: true
     label: "Average ticket size (₹)"
 
   spend_per_card:
-    sql: "SUM(t.amt) / NULLIF(COUNT(DISTINCT t.card_id),0)"
+    ratio: [amount_sum, card_count]
     default_success_filter: true
     unit_scalable: true
     money: true
     label: "Spend per card (₹)"
 
   spend_per_customer:
-    sql: "SUM(t.amt) / NULLIF(COUNT(DISTINCT t.customer_id),0)"
+    ratio: [amount_sum, customer_count]
     default_success_filter: true
     unit_scalable: true
     money: true
     label: "Spend per customer (₹)"
 
   active_cards:
-    sql: "COUNT(DISTINCT t.card_id)"
+    measure: card_count
     default_success_filter: false
     money: false
     label: "Active cards"
@@ -96,26 +133,24 @@ metrics:
     sql: "COUNT(DISTINCT t.card_id) / (SELECT COUNT(*) FROM card_master)"
     default_success_filter: false
     money: false
+    emits_assumption: active_card_denom
     label: "Active card rate"
     note: "denominator = total rows in card_master"
 
   success_rate:
-    sql: "SUM(CASE WHEN r.TD_BD = 'Success' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0)"
-    requires_join: [response_master]
+    ratio: [success_count, txn_count]
     default_success_filter: false       # computed OVER all txns, never pre-filtered
     money: false
     label: "Success rate"
 
   business_decline_rate:
-    sql: "SUM(CASE WHEN r.TD_BD = 'Business Decline' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0)"
-    requires_join: [response_master]
+    ratio: [business_decline_count, txn_count]
     default_success_filter: false
     money: false
     label: "Business decline rate"
 
   technical_decline_rate:
-    sql: "SUM(CASE WHEN r.TD_BD = 'Technical Decline' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0)"
-    requires_join: [response_master]
+    ratio: [technical_decline_count, txn_count]
     default_success_filter: false
     money: false
     label: "Technical decline rate"
@@ -396,11 +431,11 @@ semantics:
       TD_BD='Success' (adds a response_master join) — EXCEPT when the
       query references an outcome dimension (status/response) in BY or
       WHERE. In that case the default is SUPPRESSED so success-vs-decline
-      comparisons are possible.
-    also_apply_when: >
-      The user explicitly says successful/valid transactions for a
-      count metric (volume/active_cards): add the success filter even
-      though its default is false.
+      comparisons are possible. Count metrics (volume/active_cards) never
+      get it implicitly; "successful volume" is written as
+      WHERE status = 'Success'.
+    condition: "r.TD_BD = 'Success'"    # what codegen emits, in WHERE or inside measures
+    requires_join: [response_master]
     emits_assumption: success_default
 
   mixed_metrics:
@@ -411,7 +446,9 @@ semantics:
       apply it via conditional aggregation inside the success-defaulted
       metric only, e.g.
         value = SUM(CASE WHEN r.TD_BD='Success' THEN t.amt ELSE 0 END)
-      so volume still counts all attempts in the same query.
+      so volume still counts all attempts in the same query. Codegen pushes
+      the condition into every measure of those metrics (see MEASURES), so
+      ats's denominator becomes a success count too.
     emits_assumption: mixed_metrics
 
   unit_scaling:
@@ -473,10 +510,13 @@ assumptions:
 # ---------------------------------------------------------------------
 guardrails:
   read_only: true                       # SELECT only; reject any DML/DDL
-  forced_limit: 100000                  # applied when no LIMIT is present. The UI
-                                        # passes its own cap (10k / 50k / 1L / 10L)
-                                        # as an explicit LIMIT; this is only the
-                                        # runaway-query backstop, not a display cap.
+  forced_limit: 100000                  # applied at EXECUTION when the query has no
+                                        # LIMIT: at most this many rows are fetched, and
+                                        # forced_limit is emitted if rows were cut off.
+                                        # Kept out of the SQL, so the SQL shows exactly
+                                        # what was asked. The UI passes its own cap
+                                        # (10k / 50k / 1L / 10L) as an explicit LIMIT;
+                                        # this is only the runaway-query backstop.
   pii_blocked_columns:                  # never selectable, even if asked
     - customer_master.name
     - customer_master.phone_number

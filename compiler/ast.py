@@ -3,7 +3,9 @@
 These are the data shapes the stages bind to:
 
     parser     -> QueryAST        faithful transcript of the DSL, nothing inferred
-    validator  -> ValidatedQuery  names resolved, joins computed; codegen's only input
+    validator  -> ValidatedQuery  names resolved, joins computed
+    resolver   -> ResolvedQuery   filter values matched to real data (compiler/resolver.py);
+                                  wraps a ValidatedQuery and is codegen's only input
     codegen    -> CompiledQuery   SQL plus the assumptions that fired
 
 Every dataclass is frozen and every collection is a tuple, so no stage can mutate a
@@ -158,7 +160,7 @@ class QueryAST: #this class is just to check the structure of the query and to m
 
     - Collections are tuples, not lists, so the frozen dataclass is genuinely
       immutable (a frozen dataclass holding a list can still have the list mutated).
-    - `limit` stays None when the user gave no LIMIT. Codegen applies the
+    - `limit` stays None when the user gave no LIMIT. Execution applies the
       forced-limit guardrail and emits the `forced_limit` assumption; the AST must
       preserve "user gave nothing" so that can happen.
     - `order` is None unless the query had an explicit ORDER BY clause.
@@ -185,7 +187,8 @@ class QueryAST: #this class is just to check the structure of the query and to m
 
 @dataclass(frozen=True)
 class ValidatedQuery:
-    """The validator's output, and the ONLY type codegen accepts.
+    """The validator's output. Codegen accepts it only inside the resolver's
+    ResolvedQuery, so it never sees unvalidated names or unresolved values.
 
     Keeping this separate from QueryAST is deliberate: codegen is structurally unable
     to receive an unvalidated AST. Only the validator constructs this; nothing else
@@ -213,15 +216,42 @@ class ValidatedQuery:
 
 
 @dataclass(frozen=True)
+class Assumption:
+    """One assumption that fired: a key under config.yaml -> assumptions, plus the
+    values its template needs, e.g. ("period_anchor", (("ref", "2025-12-27"),)).
+
+    Params are a tuple of pairs, not a dict, so the type stays frozen and hashable.
+    Keeping the values (not just rendered text) lets the audit panel and follow-up
+    questions re-render or explain an assumption later.
+    """
+
+    key: str
+    params: tuple[tuple[str, str], ...] = ()
+
+    def render(self, template: str) -> str:
+        return template.format(**dict(self.params))
+
+
+@dataclass(frozen=True)
 class CompiledQuery:
     """Codegen's output.
 
-    `assumptions` are keys (e.g. "success_default", "unit_crore", "period_anchor",
-    "forced_limit") accumulated as validation/codegen rules fire. They are not known
-    at parse time, which is why they live here and not on QueryAST.
+    Two forms of the same SQL:
+    - `sql` has every value written in, quoted: what the audit panel shows and what
+      the grammar.md oracle compares against. Never executed.
+    - `executable_sql` has a `%s` placeholder per text value, with the values in
+      `params`, so a value can never change the query's structure. This is the one
+      the database runs.
+
+    `assumptions` accumulate as codegen rules fire (success default, unit, period,
+    corrected values, ...). They are not known at parse time, which is why they live
+    here and not on QueryAST. `forced_limit` is added at execution, not here: the
+    runaway-query cap is applied when rows are fetched and never appears in the SQL.
     """
 
     sql: str
     dsl: str  # the original DSL string, for the audit panel
     chart_type: str | None  # carried through from the AS clause
-    assumptions: tuple[str, ...]
+    assumptions: tuple[Assumption, ...]
+    executable_sql: str = ""
+    params: tuple[str, ...] = ()

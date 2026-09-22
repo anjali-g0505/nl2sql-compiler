@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 from compiler.ast import (
+    Assumption,
     CompiledQuery,
     Condition,
     MetricCondition,
@@ -376,7 +377,7 @@ def test_validated_and_compiled_queries_compose():
         sql="SELECT ...",
         dsl=validated.ast.raw_dsl,
         chart_type=validated.ast.chart_type,
-        assumptions=("success_default", "forced_limit"),
+        assumptions=(Assumption("success_default"), Assumption("unit_crore")),
     )
 
     assert validated.ast is ast
@@ -384,9 +385,30 @@ def test_validated_and_compiled_queries_compose():
     assert validated.order_by_kind == "metric"
     assert compiled.dsl == dsl
     assert compiled.chart_type == "PIE"
-    assert compiled.assumptions == ("success_default", "forced_limit")
+    assert [a.key for a in compiled.assumptions] == ["success_default", "unit_crore"]
 
 
 def test_validated_query_order_by_kind_defaults_to_none():
     v = ValidatedQuery(ast=QueryAST(metrics=(n("value"),)), joins=())
     assert v.order_by_kind is None
+
+
+# --- Assumption ---------------------------------------------------------------
+
+def test_assumption_renders_its_template():
+    a = Assumption("date_range_inclusive", (("start", "2025-05-12"), ("end", "2025-06-14")))
+    assert a.render("Date range includes both ends: {start} to {end}, inclusive.") == (
+        "Date range includes both ends: 2025-05-12 to 2025-06-14, inclusive."
+    )
+
+
+def test_assumption_is_frozen_and_hashable():
+    a = Assumption("period_anchor", (("ref", "2025-12-27"),))
+    assert {a, Assumption("period_anchor", (("ref", "2025-12-27"),))} == {a}
+    with pytest.raises(FrozenInstanceError):
+        a.key = "other"
+
+
+def test_compiled_query_executable_form_defaults_to_empty():
+    compiled = CompiledQuery(sql="SELECT 1", dsl="SHOW value", chart_type=None, assumptions=())
+    assert compiled.executable_sql == "" and compiled.params == ()

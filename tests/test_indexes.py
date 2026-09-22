@@ -3,7 +3,7 @@
 No database: `fetch` is injected, so these run anywhere. The fake stands in for
 app.db.execute_query and returns the same shape (a list of column->value dicts).
 """
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 import yaml
@@ -32,13 +32,18 @@ MCC_ROWS = [
 class FakeDB:
     """Stands in for app.db.execute_query; records calls and can be made to fail."""
 
-    def __init__(self, rows_by_table=None, fail_on=()):
+    def __init__(self, rows_by_table=None, fail_on=(), max_date="2025-12-27"):
         self.rows_by_table = rows_by_table or {}
         self.fail_on = set(fail_on)
+        self.max_date = max_date  # what SELECT MAX(date) returns; None = empty table
         self.queries = []
 
     def __call__(self, sql):
         self.queries.append(sql)
+        if "MAX(" in sql:
+            if "reference_date" in self.fail_on:
+                raise RuntimeError("card_txns is unavailable")
+            return [{"ref": self.max_date}]
         for table, rows in self.rows_by_table.items():
             if table in sql:
                 if table in self.fail_on:
@@ -218,3 +223,62 @@ def test_missing_aliases_file_is_not_an_error(tmp_path):
 ])
 def test_seconds_until_next_run(now, expected_hours):
     assert seconds_until(2, 0, now) == expected_hours * 3600
+
+
+# --- reference date -----------------------------------------------------------
+
+def test_reference_date_is_cached_by_refresh(layer):
+    fake = FakeDB(max_date="2025-12-27")
+    registry = IndexRegistry(layer=layer, fetch=fake, aliases={})
+    assert registry.reference_date is None           # nothing until the first refresh
+
+    report = registry.refresh()
+
+    assert registry.reference_date == date(2025, 12, 27)
+    assert registry.status("reference_date").ok
+    assert "reference_date" in {s.name for s in report.statuses}
+    assert sum("MAX(" in q for q in fake.queries) == 1  # once per refresh, not per query
+
+
+def test_reference_date_accepts_a_datetime(layer):
+    fake = FakeDB(max_date=datetime(2025, 12, 27, 23, 59))
+    registry = IndexRegistry(layer=layer, fetch=fake, aliases={})
+    registry.refresh(only="reference_date")
+    assert registry.reference_date == date(2025, 12, 27)
+
+
+def test_failed_reference_date_keeps_the_previous_one(layer):
+    fake = FakeDB(max_date="2025-12-27")
+    registry = IndexRegistry(layer=layer, fetch=fake, aliases={})
+    registry.refresh()
+
+    fake.fail_on.add("reference_date")
+    report = registry.refresh()
+
+    assert [s.name for s in report.failures] == ["reference_date"]
+    assert registry.reference_date == date(2025, 12, 27)
+
+
+def test_empty_fact_table_is_a_reference_date_failure(layer):
+    registry = IndexRegistry(layer=layer, fetch=FakeDB(max_date=None), aliases={})
+    report = registry.refresh()
+    assert "no transactions" in registry.status("reference_date").error
+    assert registry.reference_date is None
+    assert not report.ok
+
+
+def test_refreshing_one_index_skips_the_reference_date(layer):
+    fake = FakeDB({"merchant_master": MCC_ROWS})
+    registry = IndexRegistry(layer=layer, fetch=fake, aliases={})
+    registry.refresh("mcc")
+    assert not any("MAX(" in q for q in fake.queries)
+
+
+def test_pinned_reference_date_is_never_queried():
+    document = yaml.safe_load(open("config.yaml", encoding="utf-8"))
+    document["reference_date"] = "2025-06-30"
+    fake = FakeDB(max_date="2025-12-27")
+    registry = IndexRegistry(layer=SemanticLayer.from_dict(document), fetch=fake, aliases={})
+    registry.refresh()
+    assert registry.reference_date == date(2025, 6, 30)
+    assert not any("MAX(" in q for q in fake.queries)

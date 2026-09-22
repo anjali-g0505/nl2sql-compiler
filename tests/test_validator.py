@@ -244,6 +244,18 @@ def test_unknown_alias_in_config_is_rejected():
 
 # --- the config file itself ---------------------------------------------------
 
+def test_month_can_be_filtered_despite_commas_in_its_column():
+    # SUBSTRING(t.date,1,7) is one column; its commas are inside parentheses
+    query = check("SHOW volume BY issuer WHERE month = '2025-03'")
+    assert query.ast.filters[0].field.canonical == "month"
+
+
+def test_metric_joins_include_its_measures_joins():
+    layer = SemanticLayer.load()
+    assert list(layer.requires_join("success_rate", "metric")) == ["response_master"]
+    assert list(layer.requires_join("value", "metric")) == []
+
+
 def test_real_config_loads_and_self_checks():
     layer = SemanticLayer.load()
     assert "value" in layer.metrics and "issuer" in layer.dimensions
@@ -264,6 +276,20 @@ def test_every_multi_column_dimension_has_a_filter_column():
     ({"dimensions": {"a": {"select": "t.x", "resolution": "enum"}}}, "lists no values"),
     ({"metrics": {"x": {"aliases": ["dup"]}}, "dimensions": {"y": {"aliases": ["dup"]}}},
      "is claimed by"),
+    # metrics are built from measures, exactly one way
+    ({"metrics": {"x": {"label": "no shape"}}}, "needs exactly one of"),
+    ({"metrics": {"x": {"measure": "m", "sql": "COUNT(*)"}},
+      "measures": {"m": {"agg": "SUM", "expr": "t.amt"}}}, "needs exactly one of"),
+    ({"metrics": {"x": {"measure": "nope"}}}, "unknown measure 'nope'"),
+    ({"metrics": {"x": {"ratio": ["m"]}}}, "ratio needs [numerator, denominator]"),
+    ({"measures": {"m": {"agg": "AVG", "expr": "t.amt"}}}, "has agg 'AVG'"),
+    ({"measures": {"m": {"agg": "SUM"}}}, "has no expr"),
+    ({"metrics": {"x": {"sql": "SUM(t.amt)", "default_success_filter": True}}},
+     "build it from measures instead"),
+    ({"metrics": {"x": {"sql": "COUNT(*)", "emits_assumption": "nope"}}},
+     "emits unknown assumption 'nope'"),
+    ({"metrics": {"x": {"measure": "m", "default_success_filter": True}},
+      "measures": {"m": {"agg": "SUM", "expr": "t.amt"}}}, "needs a condition"),
 ])
 def test_bad_config_fails_at_load(broken, message):
     with pytest.raises(ConfigError) as exc:

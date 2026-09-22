@@ -35,7 +35,9 @@ CONFIG_PATH = REPO_ROOT / "config.yaml"
 
 # kind -> the config section holding it
 SECTIONS = {"metric": "metrics", "dimension": "dimensions", "attribute": "attributes"}
-SUGGESTION_THRESHOLD = 75  # below this, "did you mean" is noise rather than help 
+SUGGESTION_THRESHOLD = 75  # below this, "did you mean" is noise rather than help
+MEASURE_AGGS = ("SUM", "COUNT", "COUNT_DISTINCT")  # what codegen knows how to render
+METRIC_SHAPES = ("measure", "ratio", "sql")  # a metric is built exactly one of these ways
 #sections variable is a dictionary that maps the kind of entity (metric, dimension, attribute) to the corresponding section in the config.yaml file. 
 #suggestion_threshold variable is an integer that defines the minimum score for suggesting a similar name when a user inputs an unknown name. If the score is below this threshold, the suggestion will not be made as it is considered noise
 
@@ -51,6 +53,7 @@ class SemanticLayer:
     metrics: Mapping[str, Mapping]
     dimensions: Mapping[str, Mapping]
     attributes: Mapping[str, Mapping]
+    measures: Mapping[str, Mapping]  # base aggregates that metrics are built from
     joins: Mapping[str, Mapping]  # declaration order == emitted join order
     units: Mapping[str, int]  # CRORE -> 10000000
     chart_types: Tuple[str, ...]
@@ -85,6 +88,7 @@ class SemanticLayer:
             metrics=document.get("metrics", {}),
             dimensions=document.get("dimensions", {}),
             attributes=document.get("attributes", {}),
+            measures=document.get("measures", {}),
             joins=document.get("joins", {}),
             units=units,
             chart_types=tuple(modifiers.get("chart", {}).get("types", [])),
@@ -113,9 +117,11 @@ class SemanticLayer:
                         problems.append(f"alias {alias!r} is claimed by {clash} and {owner}")
                     alias_owners[alias.lower()] = owner
 
+        problems += self._check_metric_shapes()
+
         for key, entry in self.dimensions.items():
             select = entry.get("select", "")
-            if "," in select and not entry.get("filter_column"):
+            if len(split_columns(select)) > 1 and not entry.get("filter_column"):
                 problems.append(
                     f"dimension {key!r} selects several columns and needs a filter_column"
                 )
@@ -130,6 +136,94 @@ class SemanticLayer:
 
         if problems:
             raise ConfigError("config.yaml is inconsistent:\n  - " + "\n  - ".join(problems))
+
+    def _check_metric_shapes(self) -> list:
+        """Every metric is built one way, from measures that exist and can be rendered."""
+        problems = []
+        for key, entry in self.measures.items():
+            if entry.get("agg") not in MEASURE_AGGS:
+                problems.append(
+                    f"measure {key!r} has agg {entry.get('agg')!r}; "
+                    f"expected one of: {', '.join(MEASURE_AGGS)}"
+                )
+            if not entry.get("expr"):
+                problems.append(f"measure {key!r} has no expr")
+            for join in entry.get("requires_join", []):
+                if join not in self.joins:
+                    problems.append(f"measure {key!r} requires unknown join {join!r}")
+
+        for key, entry in self.metrics.items():
+            shapes = [s for s in METRIC_SHAPES if s in entry]
+            if len(shapes) != 1:
+                problems.append(
+                    f"metric {key!r} needs exactly one of: {', '.join(METRIC_SHAPES)}"
+                )
+                continue
+            if "ratio" in entry and len(entry["ratio"]) != 2:
+                problems.append(f"metric {key!r} ratio needs [numerator, denominator]")
+                continue
+            for measure in self.metric_measures(key):
+                if measure not in self.measures:
+                    problems.append(f"metric {key!r} uses unknown measure {measure!r}")
+            if "sql" in entry and entry.get("default_success_filter"):
+                problems.append(
+                    f"metric {key!r} is raw sql, so the success filter can't be pushed "
+                    f"into it; build it from measures instead"
+                )
+            emitted = entry.get("emits_assumption", [])
+            for assumption in [emitted] if isinstance(emitted, str) else emitted:
+                if assumption not in self.assumptions:
+                    problems.append(f"metric {key!r} emits unknown assumption {assumption!r}")
+
+        if any(m.get("default_success_filter") for m in self.metrics.values()):
+            if not self.success_condition:
+                problems.append(
+                    "semantics.implicit_success needs a condition: some metric "
+                    "defaults to the success filter"
+                )
+        return problems
+
+    # --- metrics and measures -------------------------------------------------
+
+    def metric_measures(self, key: str) -> Tuple[str, ...]:
+        """The measures a metric is built from: one, two (a ratio), or none (raw sql)."""
+        entry = self.metrics[key]
+        if "measure" in entry:
+            return (entry["measure"],)
+        return tuple(entry.get("ratio", ()))
+
+    def filter_column(self, key: str) -> Optional[str]:
+        """The one column a WHERE on this dimension compares, or None if there isn't one.
+
+        filter_column wins when set (SUBSTRING(t.date,1,7) is one column despite its
+        commas); otherwise the select, if it is a single column.
+        """
+        entry = self.dimensions[key]
+        if entry.get("filter_column"):
+            return entry["filter_column"]
+        columns = split_columns(entry.get("select", ""))
+        return columns[0] if len(columns) == 1 else None
+
+    def sql_fragments(self, key: str, kind: str) -> Tuple[str, ...]:
+        """Every SQL fragment an entry can put into a query, for guardrail checks."""
+        entry = self.entry(key, kind)
+        fragments = [entry.get(k) for k in ("select", "filter_column", "column", "sql")]
+        if kind == "metric":
+            for measure in self.metric_measures(key):
+                spec = self.measures.get(measure, {})
+                fragments += [spec.get("expr"), spec.get("filter")]
+        return tuple(str(f) for f in fragments if f)
+
+    @property
+    def success_condition(self) -> Optional[str]:
+        """The implicit success filter's SQL condition, e.g. r.TD_BD = 'Success'."""
+        return self.raw.get("semantics", {}).get("implicit_success", {}).get("condition")
+
+    @property
+    def success_joins(self) -> Sequence[str]:
+        """Joins the success condition needs."""
+        rule = self.raw.get("semantics", {}).get("implicit_success", {})
+        return rule.get("requires_join", [])
 
     # --- lookups --------------------------------------------------------------
 
@@ -157,7 +251,12 @@ class SemanticLayer:
         return getattr(self, SECTIONS[kind])[key]
 
     def requires_join(self, key: str, kind: str) -> Sequence[str]:
-        return self.entry(key, kind).get("requires_join", [])
+        """The entry's own joins, plus (for a metric) those of its measures."""
+        joins = list(self.entry(key, kind).get("requires_join", []))
+        if kind == "metric":
+            for measure in self.metric_measures(key):
+                joins += self.measures.get(measure, {}).get("requires_join", [])
+        return joins
 
     def order_joins(self, names: Iterable[str]) -> Tuple[str, ...]:
         """Deduplicate join names into config declaration order.
@@ -180,6 +279,28 @@ class SemanticLayer:
     def known(self, kind: str) -> Tuple[str, ...]:
         """Canonical keys of a kind, for listing in error messages."""
         return tuple(getattr(self, SECTIONS[kind]))
+
+
+def split_columns(fragment: str) -> Tuple[str, ...]:
+    """Split a SQL select list on its top-level commas only.
+
+    "m.mcc_code, m.mcc_description" -> two columns, but "SUBSTRING(t.date,1,7)" is
+    one: its commas are inside parentheses.
+    """
+    parts, depth, current = [], 0, ""
+    for char in fragment or "":
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append(current.strip())
+            current = ""
+        else:
+            current += char
+    if current.strip():
+        parts.append(current.strip())
+    return tuple(parts)
 
 
 def _build_aliases(document: Mapping) -> Dict[str, Dict[str, str]]:
