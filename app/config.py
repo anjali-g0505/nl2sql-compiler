@@ -30,6 +30,9 @@ class Settings:
     mysql_password: str
     mysql_database: str
     mysql_pool_size: int
+    groq_api_key: str        # empty -> no translator: questions get a 503, DSL still works
+    groq_model: str
+    groq_fallback_model: str  # used when the main model is rate limited; empty = none
 
 
 settings = Settings(
@@ -39,4 +42,7 @@ settings = Settings(
     mysql_password=os.getenv("MYSQL_PASSWORD", ""),
     mysql_database=_require("MYSQL_DATABASE"),
     mysql_pool_size=int(os.getenv("MYSQL_POOL_SIZE", "5")),
+    groq_api_key=os.getenv("GROQ_API_KEY", ""),
+    groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+    groq_fallback_model=os.getenv("GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b"),
 )
