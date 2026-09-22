@@ -148,6 +148,12 @@ class _Parser:
             raise ParseError(f"Expected {what}, got {_describe(self.peek())}", self.peek())
         return self.advance()
 
+    def expect_one_of(self, types: Sequence[TokenType], what: str) -> Token:
+        """Like expect(), where more than one token is allowed here (LAST n DAYS|MONTHS)."""
+        if not any(self.at(type_) for type_ in types):
+            raise ParseError(f"Expected {what}, got {_describe(self.peek())}", self.peek())
+        return self.advance()
+
     def error(self, what: str) -> ParseError:
         return ParseError(f"Expected {what}, got {_describe(self.peek())}", self.peek())
 
@@ -309,16 +315,17 @@ class _Parser:
             op_token,
         )
 
-    # --- period_spec := name | LAST integer DAYS | FROM date TO date ----------
+    # --- period_spec := name | LAST integer (DAYS|MONTHS) | FROM date TO date --
 
     def _period_spec(self) -> Period:
         if self.at(T.LAST):
             last = self.advance()
-            n_token = self.expect(T.INTEGER, "a whole number of days")
+            n_token = self.expect(T.INTEGER, "a whole number of days or months")
             if n_token.value < 1:
-                raise ParseError("LAST needs at least 1 day", n_token)
-            self.expect(T.DAYS, "DAYS")
-            return self._build(lambda: Period("LAST_N_DAYS", n=int(n_token.value)), last)
+                raise ParseError("LAST needs at least 1 day or month", n_token)
+            unit = self.expect_one_of((T.DAYS, T.MONTHS), "DAYS or MONTHS")
+            kind = "LAST_N_DAYS" if unit.type is T.DAYS else "LAST_N_MONTHS"
+            return self._build(lambda: Period(kind, n=int(n_token.value)), last)
         if self.at(T.FROM):
             from_token = self.advance()
             start = self._date_literal()

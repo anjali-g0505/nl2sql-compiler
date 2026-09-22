@@ -41,7 +41,7 @@ DIVISION_INDENT = SELECT_INDENT + "  "  # a split ratio's "/ denominator" line
 SQL_OPERATORS = {"!=": "<>"}  # DSL spelling -> SQL spelling; the rest are identical
 PLAIN_COLUMN = re.compile(r"^[A-Za-z_]\w*\.[A-Za-z_]\w*$")
 VALUE_MARKER = re.compile(r"\x00(\d+)\x00")  # stands in for a text value until the end
-RELATIVE_PERIODS = ("FTD", "WTD", "MTD", "QTD", "YTD", "LAST_N_DAYS")
+RELATIVE_PERIODS = ("FTD", "WTD", "MTD", "QTD", "YTD", "LAST_N_DAYS", "LAST_N_MONTHS")
 
 
 class CodegenError(Exception):
@@ -84,6 +84,12 @@ def period_bounds(period: Period, reference_date: Optional[date]) -> Tuple[date,
     }
     if period.kind == "LAST_N_DAYS":
         return ref - timedelta(days=period.n - 1), ref
+    if period.kind == "LAST_N_MONTHS":
+        # whole calendar months ending with the reference month: 5 months from
+        # 2025-12-31 is 2025-08-01 .. 2025-12-31 (not 150 days back)
+        month = ref.month - (period.n - 1)
+        year = ref.year + (month - 1) // 12
+        return date(year, (month - 1) % 12 + 1, 1), ref
     return starts[period.kind], ref
 
 
@@ -303,6 +309,14 @@ class _Codegen:
                     ("n", str(period.n)),
                     ("ref", end.isoformat()),
                     ("n_minus_1", str(period.n - 1)),
+                    ("start", start.isoformat()),
+                )))
+            elif period.kind == "LAST_N_MONTHS":
+                found.append(Assumption("last_n_months_window", (
+                    ("n", str(period.n)),
+                    ("ref", end.isoformat()),
+                    ("start_month", f"{start:%B %Y}"),
+                    ("end_month", f"{end:%B %Y}"),
                     ("start", start.isoformat()),
                 )))
             elif period.kind == "RANGE":

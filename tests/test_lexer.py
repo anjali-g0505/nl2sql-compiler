@@ -326,3 +326,11 @@ def test_decimal_must_start_with_a_digit():
 def test_unclassifiable_characters_raise(bad):
     with pytest.raises(LexError):
         tokenize(f"SHOW value {bad}")
+
+
+def test_months_is_a_keyword_like_days():
+    dsl = "SHOW value PERIOD LAST 5 MONTHS"
+    assert [t.type for t in tokenize(dsl)] == [
+        T.SHOW, T.IDENTIFIER, T.PERIOD, T.LAST, T.INTEGER, T.MONTHS, T.EOF,
+    ]
+    assert [t.type for t in tokenize("show value period last 5 months")][-2] is T.MONTHS

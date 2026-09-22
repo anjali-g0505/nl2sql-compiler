@@ -44,7 +44,7 @@ def oracle_examples():
 # --- the grammar.md oracle ----------------------------------------------------
 
 def test_every_oracle_example_is_found():
-    assert len(oracle_examples()) == 19
+    assert len(oracle_examples()) == 21
 
 
 @pytest.mark.parametrize("dsl, sql, assumptions", oracle_examples())
@@ -257,3 +257,36 @@ def test_unresolved_values_are_refused():
     with pytest.raises(CodegenError) as exc:
         generate(resolved, REF)
     assert "card_type = 'Gold'" in str(exc.value)
+
+
+# --- LAST n MONTHS ------------------------------------------------------------
+
+@pytest.mark.parametrize("ref, n, start, end", [
+    (date(2025, 12, 27), 5, "2025-08-01", "2025-12-27"),   # E21
+    (date(2025, 12, 31), 1, "2025-12-01", "2025-12-31"),   # this month so far == MTD
+    (date(2025, 2, 15), 5, "2024-10-01", "2025-02-15"),    # crosses the year end
+    (date(2026, 1, 10), 13, "2025-01-01", "2026-01-10"),   # more than a year
+])
+def test_last_n_months_covers_whole_calendar_months(ref, n, start, end):
+    compiled = compile_dsl(f"SHOW volume PERIOD LAST {n} MONTHS", reference_date=ref)
+    assert f"t.date >= '{start}' AND t.date <= '{end}'" in compiled.sql
+
+
+def test_last_1_months_equals_month_to_date():
+    months = compile_dsl("SHOW volume PERIOD LAST 1 MONTHS")
+    mtd = compile_dsl("SHOW volume PERIOD MTD")
+    assert months.sql == mtd.sql
+
+
+def test_last_n_months_states_the_window():
+    compiled = compile_dsl("SHOW volume PERIOD LAST 5 MONTHS")
+    assert keys(compiled) == ["period_anchor", "last_n_months_window"]
+    assert render_assumptions(compiled)[1] == (
+        "Last 5 months = the calendar months August 2025 to December 2025 "
+        "(2025-08-01 to 2025-12-27); the last one may be partial."
+    )
+
+
+def test_months_and_days_windows_differ():
+    assert compile_dsl("SHOW volume PERIOD LAST 5 MONTHS").sql != \
+           compile_dsl("SHOW volume PERIOD LAST 150 DAYS").sql

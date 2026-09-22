@@ -36,7 +36,7 @@ comp_op        := '=' | '!=' | '>' | '>=' | '<' | '<='
 number         := integer | decimal          (decimal = digits '.' digits, e.g. 0.9)
 sort_key       := metric | dimension
 period_spec    := period_name                 (FTD | WTD | MTD | QTD | YTD)
-                | LAST integer DAYS
+                | LAST integer (DAYS | MONTHS)
                 | FROM date_literal TO date_literal
 date_literal   := string_literal in 'YYYY-MM-DD' form, a real calendar date
 
@@ -129,12 +129,15 @@ wall-clock "MTD" would be empty). Because `date` is a string column, codegen
 **pre-computes** the period's boundary dates as string literals in Python and emits plain
 string comparisons (`t.date >= '2025-12-01'`) rather than SQL date functions. Every
 window includes both ends; `LAST n DAYS` covers exactly n days ending on the reference
-date (start = reference_date − (n−1) days). The `period_anchor` assumption records the
+date (start = reference_date − (n−1) days), and `LAST n MONTHS` covers n whole calendar
+months ending with the reference month (start = the 1st of reference month − (n−1)). The `period_anchor` assumption records the
 anchor date. *(Examples below assume `reference_date = '2025-12-27'`; your real value is
 whatever `MAX(date)` is.)*
 
 **Window size is always stated.** "Last n days" and "from X to Y" are easy to read as off
 by one, so the audit panel spells out the exact window:
+- `LAST n MONTHS` emits `last_n_months_window`: *"Last 5 months = the calendar months
+  August 2025 to December 2025 (2025-08-01 to 2025-12-27); the last one may be partial."*
 - `LAST n DAYS` also emits `last_n_days_window`: *"Last 90 days = 2025-12-27 (treated as
   today) plus the 89 days before it: 2025-09-29 to 2025-12-27."*
 - `FROM … TO` emits `date_range_inclusive`: *"Date range includes both ends: 2025-05-12
@@ -579,6 +582,61 @@ chart_type: `BAR` (inferred) · assumptions: [] *(volume, no default; `status` r
 *`!=` becomes SQL's `<>`. The negated form works the same way:
 `WHERE card_type NOT IN ('Prepaid')` → `b.card_type NOT IN ('Prepaid')`.*
 
+**E20 — one column per outcome.** *"Value, volume and ATS split by success, business decline and technical decline, for each issuer, merchant and acquirer, ordered by value, as a table."*
+```
+DSL:  SHOW success_value, business_decline_value, technical_decline_value, success_volume, business_decline_volume, technical_decline_volume, success_ats, business_decline_ats, technical_decline_ats BY issuer, merchant, acquirer ORDER BY success_value DESC AS TABLE
+```
+```sql
+SELECT i.iss_name,
+       m.name,
+       a.acq_name,
+       SUM(CASE WHEN r.TD_BD = 'Success' THEN t.amt ELSE 0 END) AS success_value,
+       SUM(CASE WHEN r.TD_BD = 'Business Decline' THEN t.amt ELSE 0 END) AS business_decline_value,
+       SUM(CASE WHEN r.TD_BD = 'Technical Decline' THEN t.amt ELSE 0 END) AS technical_decline_value,
+       SUM(CASE WHEN r.TD_BD = 'Success' THEN 1 ELSE 0 END) AS success_volume,
+       SUM(CASE WHEN r.TD_BD = 'Business Decline' THEN 1 ELSE 0 END) AS business_decline_volume,
+       SUM(CASE WHEN r.TD_BD = 'Technical Decline' THEN 1 ELSE 0 END) AS technical_decline_volume,
+       SUM(CASE WHEN r.TD_BD = 'Success' THEN t.amt ELSE 0 END)
+         / NULLIF(SUM(CASE WHEN r.TD_BD = 'Success' THEN 1 ELSE 0 END),0) AS success_ats,
+       SUM(CASE WHEN r.TD_BD = 'Business Decline' THEN t.amt ELSE 0 END)
+         / NULLIF(SUM(CASE WHEN r.TD_BD = 'Business Decline' THEN 1 ELSE 0 END),0) AS business_decline_ats,
+       SUM(CASE WHEN r.TD_BD = 'Technical Decline' THEN t.amt ELSE 0 END)
+         / NULLIF(SUM(CASE WHEN r.TD_BD = 'Technical Decline' THEN 1 ELSE 0 END),0) AS technical_decline_ats
+FROM card_txns t
+JOIN issuer_master i ON t.issuer_id = i.id
+JOIN acquirer_master a ON t.acquirer_id = a.id
+JOIN merchant_master m ON t.merchant_id = m.merchant_id
+JOIN response_master r ON t.response_code = r.response_code
+GROUP BY i.iss_name, m.name, a.acq_name
+ORDER BY success_value DESC;
+```
+chart_type: `TABLE` (explicit; compatible) · assumptions: []
+*`BY status` answers this as three ROWS per group; these metrics answer it as three
+COLUMNS in one row, which is what a side-by-side comparison needs. Nothing in the
+compiler changed: each metric is a config `measure` carrying its own `filter`, so codegen
+renders `SUM(CASE WHEN ... THEN amt ELSE 0 END)` and, for the ratios, the matching
+conditional denominator. No implicit-success assumption: the outcome is part of each
+metric, so there is no default left to apply.*
+
+**E21 — whole calendar months.** *"Value for every card type and card variant group for the past 5 months."*
+```
+DSL:  SHOW value BY card_type, card_variant PERIOD LAST 5 MONTHS
+```
+```sql
+SELECT b.card_type, b.card_variant, SUM(t.amt) AS value
+FROM card_txns t
+JOIN BIN_master b ON t.BIN = b.BIN
+JOIN response_master r ON t.response_code = r.response_code
+WHERE r.TD_BD = 'Success'
+  AND t.date >= '2025-08-01' AND t.date <= '2025-12-27'
+GROUP BY b.card_type, b.card_variant;
+```
+chart_type: `TABLE` (inferred; 2 dimensions) · assumptions: [success_default, period_anchor, last_n_months_window]
+*`LAST n MONTHS` is whole calendar months ending with the reference month, so 5 months
+from 2025-12-27 starts on 2025-08-01 — not 150 days back. The current month is included
+and may be partial, which `last_n_months_window` spells out. Use `FROM … TO` for a range
+that must end on a specific date.*
+
 ---
 
 ## 6. Coverage check
@@ -586,8 +644,8 @@ chart_type: `BAR` (inferred) · assumptions: [] *(volume, no default; `status` r
 Between E1–E19 the oracle exercises every mechanism at least once: no-join scalar, single
 join, two joins, ≥3 joins, month key, all 6 modifiers (filter, period, threshold, top-N,
 unit, chart), `HAVING` thresholds in rupees and in the display unit, relative periods and an
-explicit `FROM … TO` range, a numeric attribute in `WHERE`, `IN` lists and `!=`, the implicit-success default **and** its suppression, no-default counts,
-mixed-metric conditional aggregation, PII-safe customer, and every chart path (KPI, LINE,
+explicit `FROM … TO` range, calendar-month windows (E21), a numeric attribute in `WHERE`, `IN` lists and `!=`, the implicit-success default **and** its suppression, no-default counts,
+mixed-metric conditional aggregation, outcome-split metrics (E20), PII-safe customer, and every chart path (KPI, LINE,
 BAR, PIE, TABLE) including a fallback-eligible override. Card-level (`spend_per_card`,
 `active_card_rate`) and rate metrics are covered. New KPIs from the wider list are then
 just new DSL strings over this same machinery — no compiler change.

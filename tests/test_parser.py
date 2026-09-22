@@ -315,3 +315,22 @@ def test_errors_point_at_the_offending_token():
         parse(dsl)
     assert exc.value.position == dsl.index("big")
     assert exc.value.token.value == "big"
+
+
+# --- LAST n MONTHS ------------------------------------------------------------
+
+def test_last_n_months_is_its_own_period_kind():
+    period = parse("SHOW value PERIOD LAST 5 MONTHS").period
+    assert (period.kind, period.n) == ("LAST_N_MONTHS", 5)
+
+
+@pytest.mark.parametrize("dsl, message", [
+    ("SHOW value PERIOD LAST 5 YEARS", "Expected DAYS or MONTHS"),
+    ("SHOW value PERIOD LAST 5", "Expected DAYS or MONTHS"),
+    ("SHOW value PERIOD LAST 0 MONTHS", "at least 1 day or month"),
+    ("SHOW value PERIOD LAST MONTHS", "a whole number of days or months"),
+])
+def test_bad_last_periods_are_rejected(dsl, message):
+    with pytest.raises(ParseError) as exc:
+        parse(dsl)
+    assert message in str(exc.value)

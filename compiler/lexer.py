@@ -13,7 +13,7 @@ later semantic-validation concern. Every word that is not fixed DSL syntax becom
 IDENTIFIER, valid or not. That includes the closed value sets — period specs (MTD),
 units (CRORE) and chart types (PIE) — which live in config.yaml, so new ones are added
 there without touching this file, and a dimension may be named 'table' or 'line'.
-Only structural keywords (SHOW, BY, PERIOD, AS, LAST, DAYS, FROM, TO, ...) are fixed
+Only structural keywords (SHOW, BY, PERIOD, AS, LAST, DAYS, MONTHS, FROM, TO, ...) are fixed
 syntax here; the validator checks every value against config.
 
 Keyword matching is case-insensitive and canonicalized to uppercase;
@@ -52,6 +52,7 @@ class TokenType(Enum): #This class defines the different types of tokens that ca
     DESC = "DESC"
     LAST = "LAST"
     DAYS = "DAYS"
+    MONTHS = "MONTHS"
     FROM = "FROM"                    # PERIOD FROM 'date' TO 'date'
     TO = "TO"
     NOT = "NOT"                      # only in NOT IN (...)
@@ -59,7 +60,7 @@ class TokenType(Enum): #This class defines the different types of tokens that ca
     # Open categories
     IDENTIFIER = "IDENTIFIER"        # metric / dimension / attribute names, and the config-defined values for period_spec, unit and chart_type: MTD, CRORE, PIE, ...
     STRING = "STRING"                # 'Business Decline', quotes stripped
-    INTEGER = "INTEGER"              # LIMIT n, LAST n DAYS, HAVING thresholds
+    INTEGER = "INTEGER"              # LIMIT n, LAST n DAYS/MONTHS, HAVING thresholds
     DECIMAL = "DECIMAL"              # HAVING thresholds like 0.9
 
     # Punctuation, operators and end marker
@@ -93,6 +94,7 @@ KEYWORDS = { #again this is a dictionary that maps the uppercase representation 
     "DESC": TokenType.DESC,
     "LAST": TokenType.LAST,
     "DAYS": TokenType.DAYS,
+    "MONTHS": TokenType.MONTHS,
     "FROM": TokenType.FROM,
     "TO": TokenType.TO,
     "NOT": TokenType.NOT,
