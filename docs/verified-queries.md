@@ -225,3 +225,32 @@ Template:
   Had it copied the typo through, the enum index would have corrected it and said so.
   Filters land in WHERE (row-level) while the outcome stays inside the metrics, so the
   two mechanisms compose without interfering.
+
+## 8. "Can you tell me the issuer with the highest decline rate for the current month?"
+
+- **Date checked:** 2026-09-23
+- **DSL (before):** `SHOW business_decline_rate BY issuer PERIOD MTD ORDER BY business_decline_rate DESC LIMIT 1`
+- **Verdict:** **wrong for the question asked** — it answered "highest *business* decline
+  rate", which ranks issuers differently from "highest decline rate"
+- **Output (before):** HDFC Bank, 8.85%
+- **Checked by:** December 2025 per issuer, from a `GROUP BY r.TD_BD` query:
+
+  | Issuer | Attempts | Business | Technical | Business rate | All declines |
+  |---|---:|---:|---:|---:|---:|
+  | HDFC Bank | 113 | 10 | 1 | **8.85%** | 9.73% |
+  | HSBC Bank | 102 | 7 | 5 | 6.86% | 11.76% |
+  | State Bank of India (SBI) | 92 | 6 | 5 | 6.52% | **11.96%** |
+
+  HDFC leads on business declines only; SBI has the highest overall rate, because its
+  technical declines are five times HDFC's.
+- **Notes / fixes:** config had `success_rate`, `business_decline_rate` and
+  `technical_decline_rate` but **no overall `decline_rate`**, so the model could not express
+  the question. Added `decline_count` / `decline_amount` measures (filter
+  `r.TD_BD <> 'Success'`) and the metrics `decline_rate`, `decline_volume`, `decline_value`
+  and `decline_ats`. Config only — no compiler change.
+- **Output (after):** asked as a question, the model now writes
+  `SHOW decline_rate BY issuer PERIOD MTD ORDER BY decline_rate DESC LIMIT 1` and returns
+  **State Bank of India (SBI), 11.96%**, matching the hand-checked figure.
+- **Also worth knowing:** business and technical declines answer different questions —
+  cardholder and limit problems versus infrastructure — so both narrow metrics remain, and
+  kb-05 now warns that the two rankings can disagree.

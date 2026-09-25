@@ -75,6 +75,11 @@ measures:
     { agg: SUM, expr: "t.amt", filter: "r.TD_BD = 'Business Decline'", requires_join: [response_master] }
   technical_decline_amount:
     { agg: SUM, expr: "t.amt", filter: "r.TD_BD = 'Technical Decline'", requires_join: [response_master] }
+  # every non-success outcome, i.e. business + technical together
+  decline_count:
+    { agg: COUNT, expr: "*", filter: "r.TD_BD <> 'Success'", requires_join: [response_master] }
+  decline_amount:
+    { agg: SUM, expr: "t.amt", filter: "r.TD_BD <> 'Success'", requires_join: [response_master] }
 
 # ---------------------------------------------------------------------
 # METRICS
@@ -147,6 +152,34 @@ metrics:
     range: [0, 1]                       # a fraction: 10% = 0.1
     label: "Active card rate"
     note: "denominator = total rows in card_master"
+
+  decline_rate:                         # ALL declines: business + technical
+    ratio: [decline_count, txn_count]
+    default_success_filter: false
+    money: false
+    range: [0, 1]                       # a fraction: 10% = 0.1
+    label: "Decline rate"
+    note: "business + technical; use business_decline_rate or technical_decline_rate for one class"
+
+  decline_volume:
+    measure: decline_count
+    default_success_filter: false
+    money: false
+    label: "Declined volume"
+
+  decline_value:                        # money attempted but not captured
+    measure: decline_amount
+    default_success_filter: false
+    unit_scalable: true
+    money: true
+    label: "Declined value (₹)"
+
+  decline_ats:
+    ratio: [decline_amount, decline_count]
+    default_success_filter: false
+    unit_scalable: true
+    money: true
+    label: "Declined average ticket size (₹)"
 
   success_rate:
     ratio: [success_count, txn_count]

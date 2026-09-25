@@ -52,8 +52,10 @@ def test_prompt_is_built_from_config_and_grammar():
 
 def test_prompt_says_rates_are_fractions():
     prompt = build_system_prompt(year=2025)
-    assert ("active_card_rate, success_rate, business_decline_rate, technical_decline_rate "
-            "are fractions between 0 and 1") in prompt
+    layer = SemanticLayer.load()
+    fractions = [k for k in layer.metrics if layer.metric_range(k) == (0, 1)]
+    assert fractions, "config should mark the rate metrics as fractions"
+    assert f"{', '.join(fractions)} are fractions between 0 and 1" in prompt
     assert '"under 10%" -> < 0.1' in prompt
 
 
