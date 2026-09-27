@@ -18,6 +18,10 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.db import DatabaseError, execute_query
+from app.answerer import Answerer
+from app.assistant import Assistant
+from app.clarifications import MemoryStore, RedisStore
+from app.groq import GroqChat
 from app.pipeline import Outcome, Pipeline
 from app.translator import GroqTranslator
 from compiler.indexes import IndexRegistry, refresh_nightly
@@ -40,7 +44,45 @@ translator = (
     if settings.groq_api_key
     else None
 )
-pipeline = Pipeline(registry=index_registry, execute=execute_query, translator=translator)
+# Parked clarifications outlive the request that created them, so with more than one
+# worker they must live outside the process. Without REDIS_URL the app still works, but
+# only with a single worker: another worker cannot see what this one parked.
+clarifications = RedisStore.from_url(settings.redis_url) if settings.redis_url else MemoryStore()
+
+pipeline = Pipeline(
+    registry=index_registry,
+    execute=execute_query,
+    translator=translator,
+    store=clarifications,
+)
+
+
+def _build_answerer():
+    """Retrieval + a model, for documentation answers and explanations.
+
+    Missing pieces are not fatal: without an API key or a built index the data path
+    still works, and knowledge questions report that the assistant is unavailable.
+    """
+    if not settings.groq_api_key:
+        return None
+    try:
+        from rag.index import Retriever
+
+        return Answerer(
+            retriever=Retriever(),
+            chat=GroqChat(api_key=settings.groq_api_key, model=settings.groq_model,
+                          fallback_model=settings.groq_fallback_model or None),
+        )
+    except Exception as exc:  # no index yet, or a stale one
+        logger.warning("documentation answers unavailable: %s", exc)
+        return None
+
+
+assistant = Assistant(
+    pipeline=pipeline,
+    answerer=_build_answerer(),
+    results=RedisStore.from_url(settings.redis_url) if settings.redis_url else MemoryStore(),
+)
 
 # The React app (frontend/), once built with `npm run build`, is served from /.
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -89,6 +131,12 @@ class QueryRequest(BaseModel):
 
 class ClarificationAnswers(BaseModel):
     answers: Dict[str, str]  # question id ("q1") -> an option id, or a typed value
+    session_id: Optional[str] = None
+
+
+class Message(BaseModel):
+    message: str
+    session_id: str          # the browser's own id; scopes "explain this" to one user
 
 
 def _respond(outcome: Outcome) -> JSONResponse:
@@ -105,7 +153,20 @@ def query(request: QueryRequest) -> JSONResponse:
 @app.post("/clarifications/{clarification_id}")
 def answer_clarification(clarification_id: str, body: ClarificationAnswers) -> JSONResponse:
     """Resume a parked query with the user's answers. Same response shape as /query."""
+    if body.session_id:
+        return _respond(assistant.answer_clarification(body.session_id, clarification_id, body.answers))
     return _respond(pipeline.answer(clarification_id, body.answers))
+
+
+@app.post("/ask")
+def ask(body: Message) -> JSONResponse:
+    """One entry point for a chat message.
+
+    Routes to the data path (rows), an explanation of the last result, or an answer from
+    the documentation. Responses carry the same `status` values as /query, plus "answer"
+    for prose, which additionally has `text`, `citations` and `grounded`.
+    """
+    return _respond(assistant.ask(body.session_id, body.message))
 
 
 @app.exception_handler(DatabaseError)
