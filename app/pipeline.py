@@ -20,13 +20,13 @@ indexes and the translator are injected, which is how the tests run it.
 """
 from __future__ import annotations
 
-import threading
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from app.charts import choose_chart
+from app.clarifications import MemoryStore, Pending, Store
 from compiler.ast import Assumption, ValidatedQuery
 from compiler.codegen import PLAIN_COLUMN, CodegenError, generate
 from compiler.parser import LexError, ParseError, parse
@@ -91,18 +91,6 @@ class _Rejected(Exception):
 
 
 @dataclass
-class _Pending:
-    """A query parked until the user answers its clarification questions."""
-
-    question: Optional[str]
-    dsl: str
-    validated: ValidatedQuery
-    questions: List[Dict[str, Any]]
-    attempts: int
-    expires_at: datetime
-
-
-@dataclass
 class Pipeline:
     registry: Registry
     execute: Execute
@@ -110,12 +98,15 @@ class Pipeline:
     layer: SemanticLayer = field(default_factory=SemanticLayer.load)
     forced_limit: Optional[int] = None  # defaults to config guardrails.forced_limit
     clock: Callable[[], datetime] = datetime.now
+    # where parked clarifications wait. A dictionary is correct for one process; Redis
+    # is what lets a second worker (or container) answer what the first one parked.
+    store: Store = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.forced_limit is None:
             self.forced_limit = self.layer.guardrails.get("forced_limit")
-        self._pending: Dict[str, _Pending] = {}
-        self._lock = threading.Lock()
+        if self.store is None:
+            self.store = MemoryStore(clock=self.clock)
 
     # --- entry points ---------------------------------------------------------
 
@@ -155,9 +146,7 @@ class Pipeline:
 
     def answer(self, clarification_id: str, answers: Mapping[str, str]) -> Outcome:
         """Resume a parked query with the user's answers (option ids or typed values)."""
-        with self._lock:
-            self._purge_expired()
-            pending = self._pending.get(clarification_id)
+        pending = self.store.peek(clarification_id)
         if pending is None:
             return _error(404, "clarification", ["unknown or expired clarification id"])
 
@@ -165,11 +154,22 @@ class Pipeline:
         if missing:  # keep it parked so the user can answer again
             return _error(422, "clarification", [f"no answer for {', '.join(missing)}"])
 
-        with self._lock:
-            if self._pending.pop(clarification_id, None) is None:
-                return _error(404, "clarification", ["unknown or expired clarification id"])
+        # atomic: two clicks on the same clarification cannot both run the query
+        pending = self.store.take(clarification_id)
+        if pending is None:
+            return _error(404, "clarification", ["unknown or expired clarification id"])
 
-        validated, dsl = pending.validated, pending.dsl
+        # the DSL was parked, not the compiled query, so it is compiled again here.
+        # Compilation is deterministic, so this reproduces what was parked — unless
+        # configuration changed underneath it, which is worth reporting rather than hiding.
+        dsl = pending.dsl
+        try:
+            validated = validate(parse(dsl), self.layer)
+        except (LexError, ParseError, ValidationError) as exc:
+            errors = list(exc.errors) if isinstance(exc, ValidationError) else [str(exc)]
+            return _error(422, "clarification",
+                          ["the parked query no longer compiles: " + "; ".join(errors)], dsl=dsl)
+
         for q in pending.questions:
             chosen = str(answers[q["id"]]).strip()
             validated = _substitute(validated, q["field"], q["value"], chosen)
@@ -316,16 +316,11 @@ class Pipeline:
             questions.append(self._question(f"q{len(questions) + 1}", resolution))
 
         clarification_id = uuid.uuid4().hex
-        with self._lock:
-            self._purge_expired()
-            self._pending[clarification_id] = _Pending(
-                question=question,
-                dsl=dsl,
-                validated=validated,
-                questions=questions,
-                attempts=attempts,
-                expires_at=self.clock() + CLARIFICATION_TTL,
-            )
+        self.store.put(
+            clarification_id,
+            Pending(question=question, dsl=dsl, questions=questions, attempts=attempts),
+            CLARIFICATION_TTL,
+        )
         return Outcome(200, {
             "status": "needs_clarification",
             "clarification_id": clarification_id,
@@ -361,12 +356,6 @@ class Pipeline:
         entry = self.layer.dimension(field_key)
         status = self.registry.status(entry.get("entity") or entry.get("catalog"))
         return f" (list {status.describe_age()})" if status else ""
-
-    def _purge_expired(self) -> None:
-        now = self.clock()
-        for key in [k for k, p in self._pending.items() if p.expires_at <= now]:
-            del self._pending[key]
-
 
 def _substitute(validated: ValidatedQuery, field_key: str, old: str, new: str) -> ValidatedQuery:
     """The same query with one filter value replaced (a user's clarification answer)."""

@@ -69,6 +69,12 @@ regenerating data, run `docker compose down -v` first (this wipes the database).
 Copy-Item .env.example .env    # then set MYSQL_PASSWORD to match docker-compose.yml
 ```
 
+`REDIS_URL` decides where a parked clarification waits. Left empty, it stays in the
+app's memory, which is correct for **one worker only** — with more, the worker that
+receives the answer cannot see what another parked, and the user gets "unknown or
+expired clarification id" at random. Set it (`docker compose up -d redis`, then
+`REDIS_URL=redis://127.0.0.1:6379/0`) to run several workers or containers.
+
 Set `GROQ_API_KEY` (free at https://console.groq.com/keys) to enable natural-language
 questions. `GROQ_MODEL` defaults to `openai/gpt-oss-120b`, and `GROQ_FALLBACK_MODEL`
 (`openai/gpt-oss-20b`) is used when the main model is rate limited. Without a key, the

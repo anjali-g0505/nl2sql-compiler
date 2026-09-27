@@ -11,5 +11,14 @@ services:
       - mysql_data:/var/lib/mysql
       - ./output:/docker-entrypoint-initdb.d
 
+  redis:
+    image: redis:7-alpine
+    container_name: nl2sql-redis
+    # clarifications are short-lived and re-askable, so persistence is not worth the
+    # disk; a restart loses them and the user simply asks again
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+
 volumes:
   mysql_data:

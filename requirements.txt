@@ -5,3 +5,4 @@ python-dotenv==1.2.1
 PyYAML==6.0.3
 rapidfuzz==3.13.0
 httpx==0.28.1
+redis==7.0.1

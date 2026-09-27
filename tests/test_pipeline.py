@@ -371,3 +371,53 @@ def test_corrected_values_carry_their_parts_for_the_ui():
     assert corrected and corrected[0]["params"] == {
         "raw": "HDFC", "resolved": "HDFC Bank", "field": "issuer",
     }
+
+
+# --- clarifications across workers ---------------------------------------------
+
+def test_two_workers_sharing_a_store_can_answer_each_other(execute):
+    """The reason the store exists: with a per-process dictionary, the worker that
+    receives the answer has never heard of the clarification the other one parked."""
+    from app.clarifications import MemoryStore, RedisStore
+    from tests.test_clarifications import FakeRedis
+
+    shared = RedisStore(FakeRedis())                  # stands in for one Redis
+    worker_a = make(execute=execute, store=shared)
+    worker_b = make(execute=FakeExecute(), store=shared)
+
+    asked = worker_a.ask(dsl="SHOW volume BY issuer WHERE status = 'decline'").body
+    assert asked["status"] == "needs_clarification"
+
+    answered = worker_b.answer(asked["clarification_id"], {"q1": "Business Decline"})
+    assert answered.body["status"] == "ok"
+    assert answered.body["dsl"] == "SHOW volume BY issuer WHERE status = 'Business Decline'"
+
+    # and with a private dictionary each, the same exchange fails
+    worker_c = make(execute=FakeExecute(), store=MemoryStore())
+    parked = make(execute=FakeExecute(), store=MemoryStore()).ask(
+        dsl="SHOW volume BY issuer WHERE status = 'decline'").body
+    assert worker_c.answer(parked["clarification_id"], {"q1": "Business Decline"}).http_status == 404
+
+
+def test_a_restarted_worker_can_still_answer(execute):
+    from app.clarifications import RedisStore
+    from tests.test_clarifications import FakeRedis
+
+    redis = FakeRedis()
+    before = make(execute=execute, store=RedisStore(redis))
+    asked = before.ask(dsl="SHOW volume BY issuer WHERE status = 'decline'").body
+
+    after = make(execute=execute, store=RedisStore(redis))   # a fresh process
+    assert after.answer(asked["clarification_id"], {"q1": "Technical Decline"}).body["status"] == "ok"
+
+
+def test_the_same_clarification_cannot_be_answered_twice(execute):
+    from app.clarifications import RedisStore
+    from tests.test_clarifications import FakeRedis
+
+    pipeline = make(execute=execute, store=RedisStore(FakeRedis()))
+    asked = pipeline.ask(dsl="SHOW volume BY issuer WHERE status = 'decline'").body
+    first = pipeline.answer(asked["clarification_id"], {"q1": "Business Decline"})
+    second = pipeline.answer(asked["clarification_id"], {"q1": "Technical Decline"})
+    assert first.body["status"] == "ok"
+    assert second.http_status == 404
