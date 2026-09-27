@@ -54,7 +54,25 @@ export interface ErrorResponse {
   attempts?: number;
 }
 
-export type ApiResponse = OkResponse | ClarificationResponse | ErrorResponse;
+/** Prose rather than rows: an answer from the documentation, or an explanation of a
+ *  result. Only `/ask` returns this — `/query` is the data path and never does. */
+export interface AnswerResponse {
+  status: "answer";
+  text: string;
+  /** Sources the model actually cited, as "kb-09 > Mixed-outcome tables". */
+  citations: string[];
+  passages: string[];   // chunk ids, for debugging
+  /** False when nothing was retrieved: `text` then says it isn't in the docs. */
+  grounded: boolean;
+  /** Present only for an explanation: the result being explained. */
+  explains?: { dsl: string | null; question: string | null };
+}
+
+export type ApiResponse =
+  | OkResponse
+  | ClarificationResponse
+  | ErrorResponse
+  | AnswerResponse;
 
 async function post(url: string, body: unknown): Promise<ApiResponse> {
   let response: Response;

@@ -243,6 +243,35 @@ button.primary {
 button.primary:disabled { opacity: 0.45; }
 button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 
+/* --- answer --------------------------------------------------------------- */
+
+/* cyan marks a grounded answer, the same hue the DSL uses for a metric; an answer the
+   corpus could not support gets no accent, so it never reads as authoritative */
+.answer { border-left: 2px solid var(--cyan); }
+.answer.ungrounded { border-left-color: var(--ink-600); }
+.answer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.answer-kind { color: var(--cyan); font-size: var(--t-12); text-transform: uppercase; letter-spacing: 0.06em; }
+.answer.ungrounded .answer-kind { color: var(--ink-400); }
+.answer-explains { margin: 0 0 12px; }
+
+.answer-body p { margin: 0 0 10px; }
+.answer-body p:last-child { margin-bottom: 0; }
+.answer-body ul { margin: 0 0 10px; padding-left: 18px; color: var(--ink-200); }
+.answer-body li { margin: 4px 0; }
+
+/* a reference, and the same badge in the source list below */
+.cite {
+  color: var(--cyan); font-family: var(--font-mono); font-size: var(--t-12);
+  padding: 0 2px; cursor: help;
+}
+sup.cite { font-size: 10px; }
+
+.sources { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 4px; }
+.sources li { display: flex; gap: 8px; align-items: baseline; font-size: var(--t-12); }
+.sources .cite { cursor: default; }
+.source-doc { color: var(--ink-200); font-family: var(--font-mono); }
+.source-heading { color: var(--ink-400); }
+
 /* --- composer ------------------------------------------------------------- */
 
 .composer { position: sticky; bottom: 0; width: 100%; max-width: var(--column); margin: 0 auto; padding: 8px 20px 16px; background: linear-gradient(transparent, var(--ink-900) 40%); }

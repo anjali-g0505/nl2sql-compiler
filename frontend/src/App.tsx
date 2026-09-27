@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { answerClarification, ask, type ApiResponse } from "./api";
+import { AnswerCard } from "./components/AnswerCard";
 import { Composer, type Mode } from "./components/Composer";
 import { EmptyState } from "./components/EmptyState";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -76,6 +77,7 @@ export default function App() {
             <div key={turn.id} className="turn-answer">
               <ErrorBoundary>
                 {turn.response.status === "ok" && <ResultCard result={turn.response} />}
+                {turn.response.status === "answer" && <AnswerCard answer={turn.response} />}
                 {turn.response.status === "error" && (
                   <ErrorCard
                     error={turn.response}
