@@ -24,12 +24,10 @@ from typing import Callable, Dict, List, Optional
 
 import httpx
 
+from app.groq import DEFAULT_FALLBACK_MODEL, DEFAULT_MODEL, GROQ_URL, GroqChat, ModelError
 from app.pipeline import Feedback, TranslatorError, Unanswerable
 from compiler.semantic_layer import REPO_ROOT, SemanticLayer
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_MODEL = "openai/gpt-oss-120b"
-DEFAULT_FALLBACK_MODEL = "openai/gpt-oss-20b"  # its own rate limit; used on a 429
 GRAMMAR_PATH = REPO_ROOT / "grammar.md"
 CANNOT = "CANNOT:"  # the model's way of saying the data can't answer this
 
@@ -141,27 +139,18 @@ class GroqTranslator:
         timeout: float = 30.0,
         client: Optional[httpx.Client] = None,
     ):
-        self.api_key = api_key
+        self.chat = GroqChat(api_key=api_key, model=model, fallback_model=fallback_model,
+                             client=client, timeout=timeout)
         self.model = model
-        self.fallback_model = fallback_model if fallback_model != model else None
         self.layer = layer or SemanticLayer.load()
         self.reference_date = reference_date
-        self.client = client or httpx.Client(timeout=timeout)
         self._grammar = GRAMMAR_PATH.read_text("utf-8")
 
     def translate(self, question: str, feedback: Optional[Feedback] = None) -> str:
-        messages = self._messages(question, feedback)
         try:
-            reply = self._complete(self.model, messages)
-        except _RateLimited:
-            if not self.fallback_model:
-                raise TranslatorError("The language model is rate limited; try again in a minute.")
-            try:
-                reply = self._complete(self.fallback_model, messages)
-            except _RateLimited:
-                raise TranslatorError(
-                    "The language model is rate limited; try again in a minute."
-                ) from None
+            reply = self.chat.complete(self._messages(question, feedback))
+        except ModelError as exc:
+            raise TranslatorError(str(exc)) from None
 
         dsl = clean_reply(reply)
         if dsl.upper().startswith(CANNOT):
@@ -188,41 +177,6 @@ class GroqTranslator:
             ]
         return messages
 
-    def _complete(self, model: str, messages: List[Dict[str, str]]) -> str:
-        body = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0,
-            "max_completion_tokens": 1024,  # reasoning tokens count here too
-        }
-        if model.startswith("openai/gpt-oss"):
-            body["reasoning_effort"] = "low"   # a short formal answer needs little thinking
-            body["include_reasoning"] = False  # don't send it back: we only use the DSL
-        try:
-            response = self.client.post(
-                GROQ_URL, json=body, headers={"Authorization": f"Bearer {self.api_key}"}
-            )
-        except httpx.TimeoutException:
-            raise TranslatorError("The language model timed out.") from None
-        except httpx.HTTPError as exc:
-            raise TranslatorError(f"Could not reach the language model: {type(exc).__name__}") from None
-
-        if response.status_code == 429:
-            raise _RateLimited()
-        if response.status_code != 200:
-            raise TranslatorError(f"The language model returned HTTP {response.status_code}: {_error_message(response)}")
-        try:
-            return response.json()["choices"][0]["message"]["content"] or ""
-        except (ValueError, KeyError, IndexError, TypeError):
-            raise TranslatorError("The language model returned an unexpected response.") from None
-
 
 class _RateLimited(Exception):
-    pass
-
-
-def _error_message(response: httpx.Response) -> str:
-    try:
-        return str(response.json()["error"]["message"])
-    except (ValueError, KeyError, TypeError):
-        return response.text[:200]
+    """Kept for callers that imported it; the handling lives in app/groq.py now."""
