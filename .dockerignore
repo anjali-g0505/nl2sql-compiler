@@ -1,0 +1,16 @@
+# Keep the build context small and secrets out of the image.
+.git
+.env
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.agent_state
+knowledge/.chroma
+frontend/node_modules
+frontend/dist
+output
+tests
+docs
+generate_data.py
