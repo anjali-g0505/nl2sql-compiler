@@ -13,3 +13,8 @@ redis==7.0.1
 chromadb==1.5.9
 fastembed==0.7.4
 rank-bm25==0.2.2
+
+# Agent (agent/): the LangGraph orchestration over the pipeline, with SQLite checkpoints
+# so a paused clarification survives restarts.
+langgraph==1.2.21
+langgraph-checkpoint-sqlite==3.1.3

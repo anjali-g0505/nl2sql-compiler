@@ -226,3 +226,6 @@ node_modules/
 
 # the vector store is generated from knowledge/ by scripts/build_index.py
 knowledge/.chroma/
+
+# LangGraph checkpoints (agent/server.py)
+.agent_state/
