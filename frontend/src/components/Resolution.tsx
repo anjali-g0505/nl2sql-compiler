@@ -64,6 +64,7 @@ export function Clarification({
       ))}
       <p className="resolution-foot">
         IntentQL needs one match before it can run, so the number it gives you is the one you meant.
+        {clarification.interrupts_left === 0 && " This is the last clarification for this question."}
       </p>
       {answered ? (
         <p className="resolution-note">Answered.</p>
@@ -88,6 +89,11 @@ const HEADLINES: Record<string, string> = {
   clarification: "That clarification expired",
   compile: "The query couldn't be prepared",
   request: "Nothing to run",
+  budget: "Busy for a moment",
+  plan: "Couldn't plan an investigation",
+  investigate: "The investigation didn't finish",
+  knowledge: "The documentation assistant couldn't answer",
+  explain: "Nothing to explain",
 };
 
 export function ErrorCard({ error, onEdit }: { error: ErrorResponse; onEdit: (text: string) => void }) {

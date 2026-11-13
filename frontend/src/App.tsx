@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { answerClarification, ask, type ApiResponse } from "./api";
+import { answerClarification, ask, type ApiResponse, type ClarificationResponse } from "./api";
 import { AnswerCard } from "./components/AnswerCard";
 import { Composer, type Mode } from "./components/Composer";
 import { EmptyState } from "./components/EmptyState";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { InvestigationCard } from "./components/InvestigationCard";
 import { PipelineProgress } from "./components/PipelineStrip";
 import { ResultCard } from "./components/ResultCard";
 import { Clarification, ErrorCard } from "./components/Resolution";
@@ -16,7 +17,8 @@ type Turn =
 const EXAMPLES = [
   "Success rate by issuer this quarter",
   "Top 10 merchants by value this month",
-  "Decline reasons for credit cards in May",
+  "Why is HDFC's business decline rate so high?",
+  "What does do not honor mean?",
 ];
 
 let nextId = 1;
@@ -45,9 +47,9 @@ export default function App() {
     run(() => ask(mode === "dsl" ? { dsl: text } : { question: text }));
   };
 
-  const answer = (turnId: number, clarificationId: string, answers: Record<string, string>) => {
+  const answer = (turnId: number, clarification: ClarificationResponse, answers: Record<string, string>) => {
     setTurns((all) => all.map((t) => (t.id === turnId ? { ...t, answered: true } : t)));
-    run(() => answerClarification(clarificationId, answers));
+    run(() => answerClarification(clarification, answers));
   };
 
   const started = turns.length > 0 || busy;
@@ -78,6 +80,7 @@ export default function App() {
               <ErrorBoundary>
                 {turn.response.status === "ok" && <ResultCard result={turn.response} />}
                 {turn.response.status === "answer" && <AnswerCard answer={turn.response} />}
+                {turn.response.status === "investigation" && <InvestigationCard result={turn.response} />}
                 {turn.response.status === "error" && (
                   <ErrorCard
                     error={turn.response}
@@ -90,7 +93,7 @@ export default function App() {
                     answered={!!turn.answered}
                     onSubmit={(answers) =>
                       turn.response.status === "needs_clarification" &&
-                      answer(turn.id, turn.response.clarification_id, answers)
+                      answer(turn.id, turn.response, answers)
                     }
                   />
                 )}

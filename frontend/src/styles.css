@@ -272,6 +272,29 @@ sup.cite { font-size: 10px; }
 .source-doc { color: var(--ink-200); font-family: var(--font-mono); }
 .source-heading { color: var(--ink-400); }
 
+/* --- investigation -------------------------------------------------------- */
+
+.investigation-entities { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.pill.entity { border-color: var(--cyan); color: var(--cyan); }
+.investigation-note { color: var(--warn); font-size: var(--t-13); margin: 12px 0 0; list-style: none; }
+
+.steps { list-style: none; margin: 0; padding: 12px; display: grid; gap: 16px; }
+.step { display: grid; gap: 6px; }
+.step + .step { border-top: 1px solid var(--ink-600); padding-top: 14px; }
+.step-head { display: flex; align-items: baseline; gap: 10px; font-size: var(--t-13); }
+.step-number {
+  flex: none; width: 20px; height: 20px; border-radius: 50%; display: inline-grid; place-items: center;
+  border: 1px solid var(--cyan); color: var(--cyan); font-family: var(--font-mono); font-size: var(--t-12);
+}
+.step-purpose { color: var(--ink-050); }
+.step-status { margin-left: auto; color: var(--ink-400); font-size: var(--t-12); }
+.step.error .step-status, .step.needs_clarification .step-status { color: var(--danger); }
+.step.error .step-number, .step.needs_clarification .step-number { border-color: var(--danger); color: var(--danger); }
+.step .code-inline { margin: 0; }
+.step-note { color: var(--ink-400); font-size: var(--t-12); margin: 0; }
+.step-errors { margin: 0; padding-left: 18px; color: var(--ink-200); font-size: var(--t-13); }
+.step .table-wrap { max-height: 260px; }
+
 /* --- composer ------------------------------------------------------------- */
 
 .composer { position: sticky; bottom: 0; width: 100%; max-width: var(--column); margin: 0 auto; padding: 8px 20px 16px; background: linear-gradient(transparent, var(--ink-900) 40%); }

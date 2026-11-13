@@ -42,8 +42,12 @@ export interface ClarificationResponse {
   question: string | null;
   dsl: string;
   questions: ClarificationQuestion[];
-  expires_in_seconds: number;
-  attempts: number;
+  expires_in_seconds?: number;
+  attempts?: number;
+  /** Set when the agent paused: the answer goes to /agent/clarify for this session. */
+  session_id?: string;
+  /** How many more times the agent may ask before giving up (max 2 a question). */
+  interrupts_left?: number;
 }
 
 export interface ErrorResponse {
@@ -52,10 +56,48 @@ export interface ErrorResponse {
   errors: string[];
   dsl?: string;
   attempts?: number;
+  /** Over the per-minute token budget: seconds until it frees up. */
+  retry_after?: number;
+}
+
+/** One query the investigation ran, with what came back. */
+export interface InvestigationStep {
+  purpose: string;
+  dsl: string;
+  /** What the planner wrote, when the clauses had to be put back in order. */
+  dsl_planned?: string;
+  status: "ok" | "error" | "needs_clarification";
+  rows?: Row[];
+  row_count?: number;
+  columns?: string[];
+  metric_columns?: string[];
+  dimension_columns?: string[];
+  labels?: Record<string, string>;
+  chart_type?: OkResponse["chart_type"];
+  unit?: OkResponse["unit"];
+  sql?: string;
+  assumptions?: string[];
+  errors?: string[];
+}
+
+/** A "why" question: a plan of up to five queries, their results, and a conclusion
+ *  drawn only from those results. Only /agent/ask returns this. */
+export interface InvestigationResponse {
+  status: "investigation";
+  question: string;
+  text: string;
+  steps: InvestigationStep[];
+  /** Why the remaining steps were skipped, e.g. the entity isn't an outlier. */
+  stopped_early: string | null;
+  plan_note: string | null;
+  entities: { field: string; value: string; matched: string }[];
+  citations: string[];
+  passages: string[];
+  grounded: boolean;
 }
 
 /** Prose rather than rows: an answer from the documentation, or an explanation of a
- *  result. Only `/ask` returns this — `/query` is the data path and never does. */
+ *  result. Only `/ask` and `/agent/ask` return this — `/query` never does. */
 export interface AnswerResponse {
   status: "answer";
   text: string;
@@ -68,11 +110,16 @@ export interface AnswerResponse {
   explains?: { dsl: string | null; question: string | null };
 }
 
-export type ApiResponse =
+/** Every response from /agent/ask also says which branch handled it. */
+export type Route = "data" | "knowledge" | "explain" | "investigate";
+
+export type ApiResponse = (
   | OkResponse
   | ClarificationResponse
   | ErrorResponse
-  | AnswerResponse;
+  | AnswerResponse
+  | InvestigationResponse
+) & { route?: Route };
 
 async function post(url: string, body: unknown): Promise<ApiResponse> {
   let response: Response;
@@ -96,13 +143,28 @@ function networkError(message: string): ErrorResponse {
   return { status: "error", stage: "network", errors: [message] };
 }
 
+/** One conversation per page load. The agent keys its memory on it: "explain this"
+ *  refers to the last result in this session, and a paused clarification waits here. */
+export const SESSION_ID: string =
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `s-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+/** A question goes to the agent, which routes it: rows, an answer from the docs, an
+ *  explanation of the last result, or an investigation. DSL skips the agent and goes
+ *  straight to the compiler — no model call. */
 export function ask(input: { question: string } | { dsl: string }): Promise<ApiResponse> {
-  return post("/query", input);
+  if ("dsl" in input) return post("/query", input);
+  return post("/agent/ask", { session_id: SESSION_ID, message: input.question });
 }
 
+/** The agent resumes its own paused turn; a clarification from DSL goes back to /query's. */
 export function answerClarification(
-  id: string,
+  clarification: ClarificationResponse,
   answers: Record<string, string>,
 ): Promise<ApiResponse> {
-  return post(`/clarifications/${encodeURIComponent(id)}`, { answers });
+  if (clarification.session_id) {
+    return post("/agent/clarify", { session_id: clarification.session_id, answers });
+  }
+  return post(`/clarifications/${encodeURIComponent(clarification.clarification_id)}`, { answers });
 }

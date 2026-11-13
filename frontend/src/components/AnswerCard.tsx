@@ -15,8 +15,6 @@ import { CopyButton } from "./CopyButton";
  * rather than dropped: an uncheckable citation should look wrong, not disappear.
  */
 export function AnswerCard({ answer }: { answer: AnswerResponse }) {
-  // citations arrive in the order the model used them, which is the numbering
-  const numberOf = new Map(answer.citations.map((citation, i) => [citation, i + 1]));
   const explained = answer.explains?.dsl;
 
   return (
@@ -34,8 +32,20 @@ export function AnswerCard({ answer }: { answer: AnswerResponse }) {
         </pre>
       )}
 
+      <Prose text={answer.text} citations={answer.citations} />
+    </article>
+  );
+}
+
+/** Model prose with its citations lifted into numbered references, sources underneath.
+ *  Shared by documentation answers, explanations and investigations. */
+export function Prose({ text, citations }: { text: string; citations: string[] }) {
+  // citations arrive in the order the model used them, which is the numbering
+  const numberOf = new Map(citations.map((citation, i) => [citation, i + 1]));
+  return (
+    <>
       <div className="answer-body">
-        {toBlocks(answer.text).map((block, i) =>
+        {toBlocks(text).map((block, i) =>
           block.kind === "ul" ? (
             <ul key={i}>
               {block.lines.map((line, j) => (
@@ -48,9 +58,9 @@ export function AnswerCard({ answer }: { answer: AnswerResponse }) {
         )}
       </div>
 
-      {answer.citations.length > 0 && (
+      {citations.length > 0 && (
         <ol className="sources">
-          {answer.citations.map((citation, i) => {
+          {citations.map((citation, i) => {
             const [doc, heading] = splitCitation(citation);
             return (
               <li key={citation}>
@@ -62,7 +72,7 @@ export function AnswerCard({ answer }: { answer: AnswerResponse }) {
           })}
         </ol>
       )}
-    </article>
+    </>
   );
 }
 
@@ -109,14 +119,21 @@ function inlineCitations(text: string, numberOf: Map<string, number>): ReactNode
   while ((match = marker.exec(text)) !== null) {
     const number = numberOf.get(match[1].trim());
     if (number === undefined) continue;  // not a source we can link: leave it in the prose
-    out.push(text.slice(cursor, match.index));
+    out.push(...emphasis(text.slice(cursor, match.index), cursor));
     out.push(
-      <sup key={match.index} className="cite" title={match[1].trim()}>
+      <sup key={`c${match.index}`} className="cite" title={match[1].trim()}>
         {number}
       </sup>,
     );
     cursor = match.index + match[0].length;
   }
-  out.push(text.slice(cursor));
+  out.push(...emphasis(text.slice(cursor), cursor));
   return out;
+}
+
+/** `**bold**`, the one piece of Markdown models use even when asked for plain prose. */
+function emphasis(text: string, offset: number): ReactNode[] {
+  return text.split(/\*\*(.+?)\*\*/g).map((part, i) =>
+    i % 2 === 1 ? <strong key={`b${offset}-${i}`}>{part}</strong> : part,
+  );
 }
