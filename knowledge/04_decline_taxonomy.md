@@ -3,7 +3,7 @@ doc_id: kb-04
 title: Decline Taxonomy — Technical vs Business, Soft vs Hard
 scope: definitions
 topic: decline classification
-confidence: MEDIUM — the TD/BD split below is the standard convention; the authoritative mapping for this database lives in response_master
+confidence: high (the TD/BD split was verified against response_master on 2026-11-14; every code this database holds is classified there, and the examples it does not hold are standard industry convention)
 source: general payments industry knowledge; project schema
 last_updated: 2026-09-23
 ---

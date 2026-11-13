@@ -39,6 +39,15 @@ ANSWER_OUTPUT_ESTIMATE = 600
 ANSWER_MAX_TOKENS = 700
 COULD_NOT_ANSWER = "This query could not be answered."
 
+# Documentation sections written as instructions to the explain step, not as answers
+# for a user: retrieved for a knowledge question they read back the explain prompt's
+# contract ("every figure must appear in the payload ..."). They stay available to the
+# explain branch. tests/test_agent.py checks each one still exists in knowledge/, so a
+# renamed heading fails a test instead of silently letting the section back in.
+EXPLAIN_ONLY_SECTIONS = frozenset({
+    "kb-09 > What you are given when asked to explain a result",
+})
+
 
 @dataclass
 class Deps:
@@ -206,7 +215,8 @@ class Nodes:
             return {"passages": []}
 
         if route == KNOWLEDGE:
-            q, k, scope = message, MAX_PASSAGES, None
+            # ask for a few extra, since the explain-only sections are dropped below
+            q, k, scope = message, MAX_PASSAGES + len(EXPLAIN_ONLY_SECTIONS), None
         elif route == EXPLAIN:
             last = state["last_result"]
             q = " ".join(filter(None, [message, last.get("question") or last.get("dsl", "")]))
@@ -214,6 +224,8 @@ class Nodes:
         else:
             q, k, scope = message, inv.PLAYBOOK_K, inv.PLAYBOOK_SCOPES
         found = self.d.retriever.search(q, k=k, scope=scope)
+        if route == KNOWLEDGE:
+            found = [p for p in found if p.citation not in EXPLAIN_ONLY_SECTIONS][:MAX_PASSAGES]
         return {"passages": [{**asdict(p), "citation": p.citation} for p in found]}
 
     # --- knowledge and explain ------------------------------------------------
@@ -345,7 +357,7 @@ class _Busy(Exception):
 
 
 HYPHENS = re.compile(r"[‐‑‒–—−]")   # ‐ ‑ ‒ – — −
-MARKER = re.compile(r"\[([^\]\n]{2,200})\]")
+MARKER = re.compile(r"[\[【]([^\]】\n]{2,200})[\]】]")   # [..] and the full-width 【..】
 
 
 def normalize_citations(text: str, passages: Sequence[Passage]) -> str:

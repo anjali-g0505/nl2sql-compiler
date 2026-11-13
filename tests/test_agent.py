@@ -243,7 +243,7 @@ def test_knowledge_keeps_the_passages_in_state():
     state = run(graph, "what does do not honor mean")
     assert state["route"] == "knowledge"
     assert state["passages"][0]["citation"] == "kb-07 > Reasoning sequence"
-    assert retriever.calls == [("what does do not honor mean", 4, None)]
+    assert retriever.calls == [("what does do not honor mean", 5, None)]   # 4 + the explain-only extra
 
 
 def test_nothing_retrieved_means_no_model_call():
@@ -488,3 +488,61 @@ def test_breakdowns_are_narrowed_to_the_decline_class_asked_about():
     mixed = [{"purpose": "codes", "dsl": "SHOW volume BY response WHERE status != 'Success'"}]
     assert inv.narrow_decline_class(mixed, {"metric": "decline_rate"}) is None      # all declines: keep
     assert mixed[0]["dsl"].endswith("status != 'Success'")
+
+
+# --- explain requests with nothing to explain, and explain-only documentation -------
+
+from agent.nodes import EXPLAIN_ONLY_SECTIONS  # noqa: E402
+
+
+def test_an_explicit_explain_with_no_data_result_is_not_handed_to_the_docs():
+    route, reason = decide(vote("explain", 0.95, "explicit request to explain"), vote("knowledge", 0.8),
+                           "Can you explain this data", explainable=False)
+    assert route == "explain" and "explain will say so" in reason
+
+
+def test_explain_this_data_after_an_answer_says_there_is_nothing_to_explain():
+    chat = FakeChat("A generic refusal [kb-07 > Reasoning sequence].")
+    graph, _ = make(chat=chat, retriever=FakeRetriever(),
+                    classifier=FakeChat('{"route": "knowledge", "confidence": 1.0}',
+                                        '{"route": "knowledge", "confidence": 0.8}'))
+    run(graph, "what does do not honor mean")
+    state = run(graph, "Can you explain this data")
+    assert state["route"] == "explain" and state["http_status"] == 422
+    assert "Ask a data question first" in state["outcome"]["errors"][0]
+    assert len(chat.calls) == 1                     # only the first answer used the model
+
+
+def test_knowledge_answers_never_include_explain_only_sections():
+    contract = Passage(chunk_id="kb-09#12", text="Every figure must appear in the payload.", doc_id="kb-09",
+                       heading="What you are given when asked to explain a result", scope="interpretation aid",
+                       confidence="high", score=0.05, distance=0.2, matched_child="kb-09#12.1")
+    graph, _ = make(chat=FakeChat("Answer."), retriever=FakeRetriever(passages=(contract, PLAYBOOK)))
+    state = run(graph, "what does an explanation include")
+    assert [p["citation"] for p in state["passages"]] == ["kb-07 > Reasoning sequence"]
+
+
+def test_every_explain_only_section_still_exists_in_the_corpus():
+    from pathlib import Path
+    knowledge = Path(__file__).resolve().parent.parent / "knowledge"
+    for citation in EXPLAIN_ONLY_SECTIONS:
+        doc_id, heading = citation.split(" > ", 1)
+        [path] = [p for p in knowledge.glob("*.md") if f"doc_id: {doc_id}\n" in p.read_text("utf-8")]
+        assert f"## {heading}\n" in path.read_text("utf-8"), citation
+
+
+def test_no_document_is_marked_medium_confidence():
+    from pathlib import Path
+    import re as _re
+    knowledge = Path(__file__).resolve().parent.parent / "knowledge"
+    marked = [p.name for p in knowledge.glob("*.md")
+              if _re.search(r"^confidence:\s*medium", p.read_text("utf-8"), _re.I | _re.M)]
+    assert marked == []
+
+
+def test_full_width_brackets_and_numbered_headings_are_normalized():
+    numbered = Passage(chunk_id="kb-04#1", text="x", doc_id="kb-04",
+                       heading="1. Technical decline vs business decline (the `TD_BD` axis)",
+                       scope="definitions", confidence="high", score=0.05, distance=0.2, matched_child="kb-04#1.1")
+    fixed = normalize_citations("Owned by the issuer\u3010kb-04 > 1\u3011.", [numbered])
+    assert fixed == "Owned by the issuer[kb-04 > 1. Technical decline vs business decline (the `TD_BD` axis)]."

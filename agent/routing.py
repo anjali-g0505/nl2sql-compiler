@@ -16,6 +16,9 @@ The rules, enforced here in code whatever either vote says:
     nothing on screen to explain, so an explain vote is ignored.
   * A "why" question goes to INVESTIGATE unless it was routed to KNOWLEDGE (a why about
     the product or a definition) or to an allowed EXPLAIN.
+  * An explicit request to explain ("explain this data") with no data result on screen
+    stays EXPLAIN, which replies that there is nothing to explain. It is not handed to
+    another route.
 
 Both votes, their confidences and the reason for the decision are kept in state, so
 every routing decision can be audited from the checkpoint.
@@ -181,6 +184,15 @@ def decide(regex: Vote, llm: Optional[Vote], message: str, explainable: bool) ->
                          "the previous answer was not a data result")
             continue
         allowed.append((who, vote))
+
+    explicit = regex.route == EXPLAIN and regex.basis == "explicit request to explain"
+    if explicit and not explainable and not WHY_QUESTION.search(message):
+        # "explain this data" with no data result on screen: the honest reply is that
+        # there is nothing to explain (the explain node says so). Letting the other vote
+        # take it once sent it to the docs, which answered with how explanations are
+        # built - the explain prompt's own contract, not an answer.
+        notes.append("explicit request to explain with no data result: explain will say so")
+        return EXPLAIN, "; ".join(notes)
 
     if allowed:
         # max() keeps the first of equals, and regex is first: a tie goes to regex
