@@ -22,13 +22,16 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from rag.chunker import KNOWLEDGE, Chunk, chunk_corpus, load_documents
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
-STORE = Path(__file__).resolve().parent.parent / "knowledge" / ".chroma"
+# RAG_STORE moves the index out of knowledge/ (Docker keeps it in a volume, so the
+# knowledge folder can be a read-only bind mount)
+STORE = Path(os.getenv("RAG_STORE") or Path(__file__).resolve().parent.parent / "knowledge" / ".chroma")
 COLLECTION = "intentql-knowledge"
 CANDIDATES = 12       # per retriever, before fusion
 RRF_K = 60            # the usual reciprocal-rank-fusion constant

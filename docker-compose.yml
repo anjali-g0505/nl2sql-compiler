@@ -58,11 +58,16 @@ services:
       MYSQL_DATABASE: card_analytics
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
     ports:
-      - "8001:8000"  # host 8000 is taken by another project's API
+      - "${APP_PORT:-8001}:8000"  # locally, host 8000 is taken by another project's API
     volumes:
       - agent_state:/app/.agent_state   # LangGraph checkpoints survive container rebuilds
+      - models:/app/.models             # embedding model, downloaded on the first start only
+      - rag_index:/app/.index           # retrieval index, embedded on the first start only
+      - ./knowledge:/app/knowledge:ro   # the docs: edit on the host, restart, index rebuilds
     restart: unless-stopped
 
 volumes:
-  mysql_data:
+  mysql_data:   # the database; loaded from output/*.sql on the first start only
   agent_state:
+  models:
+  rag_index:
