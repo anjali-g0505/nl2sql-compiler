@@ -16,9 +16,11 @@ on a session replaces a pending clarification: the turn starts over from the rou
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sqlite3
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict
 
@@ -34,7 +36,8 @@ from agent.graph import build_graph
 from agent.nodes import Deps
 from app.config import settings
 from app.groq import GroqChat
-from app.main import app, pipeline
+from agent.recovery import retry_failed_sources
+from app.main import app, index_registry, pipeline
 from compiler.semantic_layer import REPO_ROOT
 
 logger = logging.getLogger(__name__)
@@ -138,5 +141,23 @@ def state(session_id: str) -> JSONResponse:
 
 
 app.include_router(router)
+
+# app/main.py's startup builds the value indexes once. If MySQL isn't up yet (e.g. after
+# Docker restarts the containers in the wrong order), keep retrying the failed ones in
+# the background rather than running without them until the nightly refresh.
+_main_lifespan = app.router.lifespan_context
+
+
+@asynccontextmanager
+async def _lifespan_with_index_retry(application):
+    async with _main_lifespan(application):
+        retry = asyncio.create_task(retry_failed_sources(index_registry))
+        try:
+            yield
+        finally:
+            retry.cancel()
+
+
+app.router.lifespan_context = _lifespan_with_index_retry
 # app/main.py mounts the built frontend at "/" last; keep it last so it can't shadow /agent
 app.router.routes.sort(key=lambda r: getattr(r, "name", "") == "frontend")

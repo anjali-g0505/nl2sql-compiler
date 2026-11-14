@@ -1,17 +1,30 @@
+# Secrets come from .env (see .env.example); compose stops with a clear message if one
+# is missing. MySQL and Redis are published on 127.0.0.1 only: reachable from this
+# machine (for running the API or the eval scripts outside Docker), never from the
+# network. The app reaches both over the compose network.
 services:
   mysql:
     image: mysql:8.0
     container_name: nl2sql-mysql
+    restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: card_analytics
+      # the app's read-only account, created by docker/mysql/03_app_user.sh
+      APP_DB_USER: ${MYSQL_USER:?set MYSQL_USER in .env}
+      APP_DB_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
     ports:
-      - "3307:3306"  # host 3306 is taken by the local MySQL80 service
+      - "127.0.0.1:3307:3306"  # host 3306 is taken by the local MySQL80 service
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./output:/docker-entrypoint-initdb.d
+      # first boot of a new volume only, in this order: schema, data, read-only app user.
+      # Mounted file by file: a file mounted inside a mounted folder leaves an empty
+      # placeholder in that folder on the host.
+      - ./output/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./output/02_data.sql:/docker-entrypoint-initdb.d/02_data.sql:ro
+      - ./docker/mysql/03_app_user.sh:/docker-entrypoint-initdb.d/03_app_user.sh:ro
     healthcheck:   # the app waits for this, so its startup index build finds the data
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -19,11 +32,13 @@ services:
   redis:
     image: redis:7-alpine
     container_name: nl2sql-redis
+    restart: unless-stopped
     # clarifications are short-lived and re-askable, so persistence is not worth the
     # disk; a restart loses them and the user simply asks again
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   app:
     build: .
@@ -34,16 +49,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
-    # GROQ_API_KEY and the model names come from .env; the connection settings below
-    # override .env's, which point at the host ports for running outside Docker
+    # GROQ_API_KEY, the models and the database account come from .env; host and port
+    # are overridden because .env points at the published ports for runs outside Docker
     env_file: .env
     environment:
       MYSQL_HOST: mysql
       MYSQL_PORT: "3306"
-      MYSQL_USER: root
-      MYSQL_PASSWORD: root123
       MYSQL_DATABASE: card_analytics
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
     ports:
       - "8001:8000"  # host 8000 is taken by another project's API
     volumes:
